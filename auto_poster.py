@@ -110,7 +110,7 @@ def format_text(original_text, price):
     
     cleaned = re.sub(pattern, replace_price, cleaned)
     
-    footer = f"\nПо поводу покупки данного автомобиля или подбора:\n[«Написать менеджеру»]({MANAGER_LINK}) (Ответ в течении 1ч) 📞📧\n\n{TARGET_CHANNEL_NAME}"
+    footer = f"\nПо поводу покупки данного автомобиля или подбора:\n[«Написать менеджеру»]({MANAGER_LINK}) (Ответ в течении 1ч) 📧📞\n\n{TARGET_CHANNEL_NAME}"
     
     return cleaned + footer
 
