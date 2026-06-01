@@ -138,7 +138,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         save_processed(msg_id)
-        logger.info(f"✅ Опубликовано\n")
+        logger.info(f"✅ Опубликовано в {TARGET_CHANNEL_NAME}\n")
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
 
@@ -152,11 +152,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application):
     logger.info("\n" + "="*70)
-    logger.info("🚀 PROAUTO BOT v2 - POLLING MODE")
+    logger.info("🚀 PROAUTO BOT v2 - BOT API MODE")
     logger.info("="*70)
-    logger.info(f"📤 Группа: {TARGET_CHANNEL_NAME}")
+    logger.info(f"📤 Целевая группа: {TARGET_CHANNEL_NAME}")
     logger.info(f"💰 Наценка: +{PRICE_ADD:,} ₽")
-    logger.info(f"✅ БОТ ЗАПУЩЕН")
+    logger.info(f"✅ БОТ ЗАПУЩЕН И РАБОТАЕТ")
     logger.info("="*70 + "\n")
 
 async def main():
@@ -171,3 +171,5 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("\n❌ БОТ ОСТАНОВЛЕН")
+    except Exception as e:
+        logger.error(f"\n❌ ОШИБКА: {e}")
