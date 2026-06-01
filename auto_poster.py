@@ -1,4 +1,3 @@
-import asyncio
 import re
 import json
 import os
@@ -7,6 +6,8 @@ from dotenv import load_dotenv
 from telegram import Bot, Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import logging
+import signal
+import sys
 
 load_dotenv()
 
@@ -18,8 +19,13 @@ PRICE_ADD = int(os.getenv('PRICE_ADD', 40000))
 
 PROCESSED_FILE = 'processed_posts.json'
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
+
+app_instance = None
 
 def load_processed():
     if os.path.exists(PROCESSED_FILE):
@@ -52,8 +58,8 @@ def is_valid_announcement(text: str, has_photo: bool) -> tuple:
         return False, "нет цены"
     
     auto_keywords = [
-        r'BMW|Audi|Mercedes|Toyota|Volkswagen|Ford|Kia|Mazda|Honda|Hyundai|Volvo|Skoda|LADA',
-        r'авто|машин|автомобиль|кроссовер|седан',
+        r'BMW|Audi|Mercedes|Toyota|Volkswagen|Ford|Kia|Mazda|Honda|Hyundai|Volvo|Skoda|LADA|Chrysler|Dodge|Porsche|Ferrari|Lamborghini',
+        r'авто|машин|автомобиль|кроссовер|седан|хэтчбэк|минивэн|пикап',
     ]
     has_auto = any(re.search(k, text, re.IGNORECASE) for k in auto_keywords)
     if not has_auto:
@@ -96,32 +102,37 @@ def format_text(original_text: str, price: int) -> str:
     return cleaned + footer
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    msg_id = message.message_id
-    
-    if is_already_processed(msg_id):
-        return
-    
-    text = message.text or message.caption or ""
-    has_photo = bool(message.photo)
-    
-    logger.info(f"\n📝 Сообщение {msg_id}: {text[:50]}...")
-    
-    valid, reason = is_valid_announcement(text, has_photo)
-    if not valid:
-        logger.info(f"⏭️  {reason}")
-        return
-    
-    price = extract_price(text)
-    if not price:
-        logger.info(f"⏭️  Цена не найдена")
-        return
-    
-    logger.info(f"💰 {price:,} ₽ → {price + PRICE_ADD:,} ₽")
-    
-    formatted = format_text(text, price)
-    
     try:
+        message = update.message
+        if not message:
+            return
+        
+        msg_id = message.message_id
+        
+        if is_already_processed(msg_id):
+            logger.info(f"Пост {msg_id} уже обработан")
+            return
+        
+        text = message.text or message.caption or ""
+        has_photo = bool(message.photo)
+        
+        logger.info(f"\n📝 НОВОЕ СООБЩЕНИЕ {msg_id}")
+        logger.info(f"Текст: {text[:60]}...")
+        
+        valid, reason = is_valid_announcement(text, has_photo)
+        if not valid:
+            logger.info(f"⏭️  {reason}")
+            return
+        
+        price = extract_price(text)
+        if not price:
+            logger.info(f"⏭️  Цена не найдена")
+            return
+        
+        logger.info(f"💰 {price:,} ₽ → {price + PRICE_ADD:,} ₽")
+        
+        formatted = format_text(text, price)
+        
         if message.photo:
             photo = message.photo[-1]
             await context.bot.send_photo(
@@ -130,46 +141,76 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=formatted,
                 parse_mode='HTML'
             )
+            logger.info(f"✅ Опубликовано с фото в {TARGET_CHANNEL_NAME}")
         else:
             await context.bot.send_message(
                 chat_id=TARGET_GROUP_ID,
                 text=formatted,
                 parse_mode='HTML'
             )
+            logger.info(f"✅ Опубликовано в {TARGET_CHANNEL_NAME}")
         
         save_processed(msg_id)
-        logger.info(f"✅ Опубликовано в {TARGET_CHANNEL_NAME}\n")
+        logger.info(f"💾 Сохранено в базу\n")
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка обработки: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"✅ Бот активен!\n\n"
-        f"📤 Пересылайте объявления об авто\n"
-        f"🎯 Будут опубликованы в: {TARGET_CHANNEL_NAME}\n"
-        f"💰 Наценка: +{PRICE_ADD:,} ₽"
-    )
+    try:
+        await update.message.reply_text(
+            f"✅ Бот активен!\n\n"
+            f"📤 Пересылайте объявления об авто\n"
+            f"🎯 Будут опубликованы в: {TARGET_CHANNEL_NAME}\n"
+            f"💰 Наценка: +{PRICE_ADD:,} ₽\n\n"
+            f"Требования:\n"
+            f"• Фото\n"
+            f"• Описание с ценой\n"
+            f"• Марка автомобиля"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в start: {e}")
 
 async def post_init(application):
     logger.info("\n" + "="*70)
-    logger.info("🚀 PROAUTO BOT v2 - BOT API MODE")
+    logger.info("🚀 PROAUTO BOT v2")
     logger.info("="*70)
     logger.info(f"📤 Целевая группа: {TARGET_CHANNEL_NAME}")
     logger.info(f"💰 Наценка: +{PRICE_ADD:,} ₽")
     logger.info(f"✅ БОТ ЗАПУЩЕН И РАБОТАЕТ")
-    logger.info("="*70 + "\n")
+    logger.info(f"📍 Режим: Polling (Bot API)")
+    logger.info("="*70)
+    logger.info(f"✍️  Ожидаю сообщений...\n")
 
-async def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(MessageHandler(filters.COMMAND, start))
-    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO, process_message))
+def main():
+    global app_instance
     
-    await app.run_polling()
+    try:
+        logger.info("⏳ Инициализация Application...")
+        
+        app_instance = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+        
+        app_instance.add_handler(MessageHandler(filters.COMMAND, start))
+        app_instance.add_handler(MessageHandler(
+            filters.TEXT | filters.CAPTION | filters.PHOTO,
+            process_message
+        ))
+        
+        logger.info("⏳ Запуск бота...")
+        app_instance.run_polling(
+            allowed_updates=['message'],
+            drop_pending_updates=True,
+            poll_interval=1.0,
+            timeout=30,
+            read_timeout=30,
+            write_timeout=30,
+            connect_timeout=30
+        )
+        
+    except Exception as e:
+        logger.error(f"ОШИБКА: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("\n❌ БОТ ОСТАНОВЛЕН")
-    except Exception as e:
-        logger.error(f"\n❌ ОШИБКА: {e}")
+    main()
