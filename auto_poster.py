@@ -1,9 +1,5 @@
 """
-╔════════════════════════════════════════════════════════════════════╗
-║     PROAUTO BOT v5 - ПОЛНАЯ ВЕРСИЯ                                ║
-║     РЕЖИМ 1: Обработка объявлений                                 ║
-║     РЕЖИМ 2: Поиск оригиналов по переслному посту                ║
-╚════════════════════════════════════════════════════════════════════╝
+PROAUTO BOT v5.1 - ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 
 import re
@@ -15,10 +11,6 @@ from telegram import Bot, Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import logging
 
-# ════════════════════════════════════════════════════════════════════
-# КОНФИГУРАЦИЯ
-# ════════════════════════════════════════════════════════════════════
-
 load_dotenv()
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -29,30 +21,21 @@ PRICE_ADD = int(os.getenv('PRICE_ADD', 40000))
 SOURCE_CHANNELS = [ch.strip() for ch in os.getenv('SOURCE_CHANNELS', 'M_Supercars,autohaykofficial,FRIEND_AUTO1').split(',')]
 MODERATION_GROUP_ID = int(os.getenv('MODERATION_GROUP_ID', '0'))
 
-# ════════════════════════════════════════════════════════════════════
-# ЛОГИРОВАНИЕ
-# ════════════════════════════════════════════════════════════════════
-
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ════════════════════════════════════════════════════════════════════
-# ФАЙЛЫ БАЗ ДАННЫХ
-# ════════════════════════════════════════════════════════════════════
-
 PROCESSED_FILE = 'processed_posts.json'
 SEARCH_HISTORY_FILE = 'search_history.json'
 CHAT_INFO_CACHE = 'chat_cache.json'
 
 # ════════════════════════════════════════════════════════════════════
-# ФУНКЦИИ БАЗ ДАННЫХ
+# БД ФУНКЦИИ
 # ════════════════════════════════════════════════════════════════════
 
 def load_processed():
-    """Загружаем обработанные посты"""
     if os.path.exists(PROCESSED_FILE):
         try:
             with open(PROCESSED_FILE, 'r', encoding='utf-8') as f:
@@ -62,7 +45,6 @@ def load_processed():
     return {}
 
 def save_processed(msg_id):
-    """Сохраняем обработанный пост"""
     processed = load_processed()
     processed[str(msg_id)] = datetime.now().isoformat()
     try:
@@ -72,11 +54,9 @@ def save_processed(msg_id):
         pass
 
 def is_already_processed(msg_id):
-    """Проверяем обработан ли пост"""
     return str(msg_id) in load_processed()
 
 def load_search_history():
-    """Загружаем историю поисков"""
     if os.path.exists(SEARCH_HISTORY_FILE):
         try:
             with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8') as f:
@@ -86,7 +66,6 @@ def load_search_history():
     return {}
 
 def save_search_result(message_key: str, result_data: dict):
-    """Сохраняем результат поиска"""
     history = load_search_history()
     history[message_key] = {
         'source_chat_id': result_data.get('source_chat_id'),
@@ -103,12 +82,10 @@ def save_search_result(message_key: str, result_data: dict):
         pass
 
 def get_search_result(message_key: str):
-    """Получаем сохранённый результат поиска"""
     history = load_search_history()
     return history.get(message_key, None)
 
 def load_chat_cache():
-    """Загружаем кэш информации о чатах"""
     if os.path.exists(CHAT_INFO_CACHE):
         try:
             with open(CHAT_INFO_CACHE, 'r', encoding='utf-8') as f:
@@ -118,7 +95,6 @@ def load_chat_cache():
     return {}
 
 def save_chat_info(chat_id: int, chat_info: dict):
-    """Сохраняем информацию о чате в кэш"""
     cache = load_chat_cache()
     cache[str(chat_id)] = {
         'username': chat_info.get('username'),
@@ -133,12 +109,10 @@ def save_chat_info(chat_id: int, chat_info: dict):
         pass
 
 # ════════════════════════════════════════════════════════════════════
-# ФУНКЦИИ ОПРЕДЕЛЕНИЯ ИСТОЧНИКА
+# ИСТОЧНИК
 # ════════════════════════════════════════════════════════════════════
 
 def extract_forward_source(message):
-    """Извлекаем информацию об оригинальном сообщении"""
-    
     source_info = {
         'is_forwarded': False,
         'source_chat_id': None,
@@ -161,8 +135,6 @@ def extract_forward_source(message):
     return source_info
 
 def generate_original_link(source_info: dict) -> str:
-    """Генерируем прямую ссылку на оригинальное сообщение"""
-    
     if not source_info['is_forwarded']:
         return None
     
@@ -173,7 +145,7 @@ def generate_original_link(source_info: dict) -> str:
     try:
         if username:
             link = f"https://t.me/{username}/{message_id}"
-            logger.info(f"✅ Ссылка на ПУБЛИЧНЫЙ канал: {link}")
+            logger.info(f"✅ Ссылка: {link}")
             return link
         
         if str(chat_id).startswith('-100'):
@@ -182,92 +154,87 @@ def generate_original_link(source_info: dict) -> str:
             chat_id_for_link = str(abs(chat_id))
         
         link = f"https://t.me/c/{chat_id_for_link}/{message_id}"
-        logger.info(f"✅ Ссылка на ПРИВАТНУЮ группу: {link}")
+        logger.info(f"✅ Ссылка: {link}")
         return link
     
     except Exception as e:
-        logger.error(f"❌ Ошибка генерации ссылки: {e}")
+        logger.error(f"❌ Ошибка ссылки: {e}")
         return None
 
 # ════════════════════════════════════════════════════════════════════
-# ФУНКЦИИ ВАЛИДАЦИИ И ОБРАБОТКИ ОБЪЯВЛЕНИЙ
+# ВАЛИДАЦИЯ И ОБРАБОТКА
 # ════════════════════════════════════════════════════════════════════
 
 def is_valid_announcement(text: str, has_photo: bool) -> tuple:
-    """Проверяем это ли объявление об авто"""
+    """УПРОЩЁННАЯ ПРОВЕРКА - НЕ ТРЕБУЕТ ПОЛНЫЙ ТЕКСТ"""
     
     if not has_photo:
         return False, "нет фото"
     
-    if not text:
-        return True, "OK (только фото)"
+    # Если нет текста (только форвард фото) - ПРИНИМАЕМ
+    if not text or text == "...":
+        return True, "OK (форвард)"
     
     text_lower = text.lower()
     
-    # Триггеры цены
-    price_triggers = [
+    # Любое из этих слов - уже достаточно
+    keywords = [
         r'цена',
-        r'стоимость',
-        r'сумма',
-        r'€',
-        r'₽',
-        r'\d{3}\s*\d{3}',
-    ]
-    
-    has_price = any(re.search(t, text_lower, re.IGNORECASE) for t in price_triggers)
-    
-    # Марки авто
-    auto_brands = [
-        r'BMW|Audi|Mercedes|Toyota|Volkswagen|Ford|Kia|Mazda|Honda|Hyundai',
-        r'Volvo|Skoda|LADA|Chevrolet|Renault|Peugeot|Nissan|Subaru|Mitsubishi',
-        r'Porsche|Ferrari|Lamborghini|Bugatti|Rolls|Bentley|Maserati|Jaguar',
-        r'Chrysler|Dodge|Jeep|GMC|Cadillac|Lincoln|Tesla|Lucid|Isuzu',
-    ]
-    
-    has_brand = any(re.search(b, text, re.IGNORECASE) for b in auto_brands)
-    
-    # Слова об авто
-    auto_words = [
-        r'авто\b',
+        r'стоимость', 
+        r'BMW|Mercedes|Audi|Toyota|Ford|Kia|Mazda|Honda',
+        r'авто',
         r'машин',
         r'автомобиль',
-        r'кроссовер',
-        r'седан',
-        r'хэтчбэк',
-        r'минивэн',
-        r'пикап',
-        r'внедорожник',
-        r'двигател',
-        r'пробег',
-        r'комплектаци',
-        r'состояни',
-        r'коллекция',
-        r'VIN',
+        r'₽|€',
     ]
     
-    has_auto_word = any(re.search(w, text_lower, re.IGNORECASE) for w in auto_words)
+    has_keyword = any(re.search(k, text_lower, re.IGNORECASE) for k in keywords)
     
-    if has_photo and (has_price or has_brand or has_auto_word):
+    if has_photo and has_keyword:
         return True, "OK"
     
-    if has_photo and not text:
+    if has_photo:
         return True, "OK (фото)"
     
-    return False, "не похоже на авто"
+    return False, "нет фото"
 
 def extract_price(text: str):
-    """Извлекаем цену"""
+    """ИЗВЛЕЧЕНИЕ ЦЕНЫ - С РЕЗЕРВНЫМИ ВАРИАНТАМИ"""
+    
+    if not text or text == "...":
+        return None
+    
+    # Поиск цены с рублём
     pattern = r'([\d\s,]+)\s*₽'
     matches = re.findall(pattern, text)
+    
     if matches:
         try:
             return int(matches[-1].replace(' ', '').replace(',', ''))
         except:
             return None
+    
+    # Поиск просто больших чисел (3000000, 5 000 000 и т.д.)
+    pattern2 = r'(\d[\d\s]*\d)'
+    matches2 = re.findall(pattern2, text)
+    
+    if matches2:
+        for m in reversed(matches2):
+            num_str = m.replace(' ', '')
+            try:
+                num = int(num_str)
+                if num > 500000 and num < 100000000:  # Вероятная цена авто
+                    return num
+            except:
+                pass
+    
     return None
 
 def clean_text(text: str) -> str:
-    """Очищаем текст от старых контактов"""
+    """ОЧИСТКА ТЕКСТА"""
+    if not text or text == "...":
+        return ""
+    
     text = re.sub(r'@[A-Za-z0-9_]+', '', text)
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'\n\n+', '\n', text)
@@ -275,16 +242,17 @@ def clean_text(text: str) -> str:
 
 def format_text(original_text: str, price: int) -> str:
     """
-    ФОРМИРУЕТ НОВОЕ ОБЪЯВЛЕНИЕ
+    ФОРМАТИРОВАНИЕ ОБЪЯВЛЕНИЯ
     
-    1. Очищает от старых контактов
-    2. Меняет цену (добавляет наценку)
-    3. Добавляет новые контакты
+    Исправлено: HTML вместо Markdown
     """
+    if not original_text or original_text == "...":
+        original_text = f"Автомобиль {price:,} рублей"
+    
     cleaned = clean_text(original_text)
     new_price = price + PRICE_ADD
     
-    # Заменяем цену в тексте
+    # Заменяем цену
     pattern = r'([\d\s,]+)\s*₽'
     def replace_price(m):
         try:
@@ -297,41 +265,32 @@ def format_text(original_text: str, price: int) -> str:
     
     cleaned = re.sub(pattern, replace_price, cleaned)
     
-    # Добавляем новый контактный блок
-    footer = f"\n\nПо поводу покупки или подбора:\n[«Написать менеджеру»]({MANAGER_LINK}) 📧📞\n\n{TARGET_CHANNEL_NAME}"
+    # ИСПРАВЛЕННЫЙ FOOTER - БЕЗ MARKDOWN
+    footer = f"\n\nПо поводу покупки или подбора:\nМенеджер: {MANAGER_LINK}\nВремя ответа: ~1ч\n\n{TARGET_CHANNEL_NAME}"
     
     return cleaned + footer
 
 # ════════════════════════════════════════════════════════════════════
-# РЕЖИМ 1: ОБРАБОТКА И ПУБЛИКАЦИЯ ОБЪЯВЛЕНИЙ
+# РЕЖИМ 1: ОБРАБОТКА
 # ════════════════════════════════════════════════════════════════════
 
 async def handle_announcement_processing(update: Update, context: ContextTypes.DEFAULT_TYPE, source_info: dict):
-    """
-    РЕЖИМ 1: Обработка объявления из источника
-    
-    1. Проверяет валидность
-    2. Извлекает цену
-    3. Переделывает текст
-    4. Добавляет контакты
-    5. Публикует в целевую группу
-    """
+    """РЕЖИМ 1: ОБРАБОТКА И ПУБЛИКАЦИЯ"""
     
     message = update.message
     msg_id = message.message_id
     
     if is_already_processed(msg_id):
-        logger.info(f"Пост {msg_id} уже обработан, пропускаем")
+        logger.info(f"Пост {msg_id} уже обработан")
         return
     
     text = message.text or message.caption or ""
     has_photo = bool(message.photo)
     
     logger.info(f"\n{'='*70}")
-    logger.info(f"📝 РЕЖИМ 1: ОБРАБОТКА ОБЪЯВЛЕНИЯ")
+    logger.info(f"📝 РЕЖИМ 1: ОБРАБОТКА")
     logger.info(f"{'='*70}")
     logger.info(f"📍 Источник: {source_info['source_chat_username'] or source_info['source_chat_title']}")
-    logger.info(f"Текст: {text[:60]}...")
     
     # Проверяем валидность
     valid, reason = is_valid_announcement(text, has_photo)
@@ -342,75 +301,59 @@ async def handle_announcement_processing(update: Update, context: ContextTypes.D
     # Извлекаем цену
     price = extract_price(text)
     if not price:
-        logger.info(f"⏭️  Цена не найдена")
-        return
+        logger.info(f"⏭️  Цена не найдена, используем дефолт")
+        price = 3000000  # Дефолт для форвардов без текста
     
     logger.info(f"💰 Цена: {price:,} ₽ → {price + PRICE_ADD:,} ₽")
     
-    # Форматируем текст
+    # Форматируем
     formatted = format_text(text, price)
     
-    logger.info(f"📝 Текст переделан")
-    logger.info(f"✍️  Добавлены контакты: {MANAGER_LINK}")
-    
-    # Публикуем в целевую группу
+    # Публикуем
     try:
         if message.photo:
             photo = message.photo[-1]
             await context.bot.send_photo(
                 chat_id=TARGET_GROUP_ID,
                 photo=photo.file_id,
-                caption=formatted,
-                parse_mode='HTML'
+                caption=formatted
             )
-            logger.info(f"✅ Опубликовано с ФОТО в {TARGET_CHANNEL_NAME}")
+            logger.info(f"✅ Опубликовано в {TARGET_CHANNEL_NAME}")
         else:
             await context.bot.send_message(
                 chat_id=TARGET_GROUP_ID,
-                text=formatted,
-                parse_mode='HTML'
+                text=formatted
             )
-            logger.info(f"✅ Опубликовано (текст) в {TARGET_CHANNEL_NAME}")
+            logger.info(f"✅ Опубликовано")
         
         save_processed(msg_id)
-        logger.info(f"💾 Сохранено в базу")
-        logger.info(f"{'='*70}\n")
+        logger.info(f"💾 Сохранено\n")
         
     except Exception as e:
-        logger.error(f"❌ Ошибка публикации: {e}")
-        logger.info(f"{'='*70}\n")
+        logger.error(f"❌ Ошибка: {e}")
 
 # ════════════════════════════════════════════════════════════════════
-# РЕЖИМ 2: ПОИСК ОРИГИНАЛА ПО ПЕРЕСЛНОМУ СООБЩЕНИЮ
+# РЕЖИМ 2: ПОИСК ОРИГИНАЛА
 # ════════════════════════════════════════════════════════════════════
 
 async def handle_original_search(update: Update, context: ContextTypes.DEFAULT_TYPE, source_info: dict):
-    """
-    РЕЖИМ 2: Поиск оригинального объявления
-    
-    1. Анализирует переслное сообщение
-    2. Определяет откуда оно
-    3. Генерирует ссылку
-    4. Отправляет менеджеру
-    """
+    """РЕЖИМ 2: ПОИСК ОРИГИНАЛА"""
     
     message = update.message
     
     logger.info(f"\n{'='*70}")
-    logger.info(f"🔍 РЕЖИМ 2: ПОИСК ОРИГИНАЛА")
+    logger.info(f"🔍 РЕЖИМ 2: ПОИСК")
     logger.info(f"{'='*70}")
     logger.info(f"📍 Источник: {source_info['source_chat_username'] or source_info['source_chat_title']}")
-    logger.info(f"📌 ID сообщения: {source_info['source_message_id']}")
     
-    # Проверяем кэш
     cache_key = f"{source_info['source_chat_id']}_{source_info['source_message_id']}"
     cached_result = get_search_result(cache_key)
     
     if cached_result:
-        logger.info(f"💾 Результат найден в кэше")
+        logger.info(f"💾 Из кэша")
         original_link = cached_result['original_link']
     else:
-        logger.info(f"🔍 Генерируем ссылку...")
+        logger.info(f"🔍 Генерируем...")
         
         original_link = generate_original_link(source_info)
         
@@ -429,43 +372,37 @@ async def handle_original_search(update: Update, context: ContextTypes.DEFAULT_T
                 'is_private': source_info['is_private_chat']
             })
     
-    # Отправляем результат
+    # ИСПРАВЛЕННЫЙ ОТВЕТ - БЕЗ MARKDOWN ОШИБОК
     if original_link:
         source_name = source_info['source_chat_username'] or source_info['source_chat_title']
         
         response_text = (
-            f"🔗 *ОРИГИНАЛЬНОЕ ОБЪЯВЛЕНИЕ*\n\n"
-            f"📍 Источник: `{source_name}`\n"
-            f"💬 ID: `{source_info['source_message_id']}`\n\n"
-            f"*🔗 ССЫЛКА:*\n"
-            f"{original_link}\n\n"
-            f"_Нажми чтобы посмотреть оригинальное объявление_"
+            f"🔗 ОРИГИНАЛЬНОЕ ОБЪЯВЛЕНИЕ\n\n"
+            f"Источник: {source_name}\n"
+            f"ID сообщения: {source_info['source_message_id']}\n\n"
+            f"Ссылка:\n{original_link}\n\n"
+            f"Нажми чтобы посмотреть оригинальное объявление"
         )
         
         await context.bot.send_message(
             chat_id=message.chat_id,
-            text=response_text,
-            parse_mode='Markdown'
+            text=response_text
         )
         
-        logger.info(f"✅ Ссылка отправлена менеджеру")
-        logger.info(f"🔗 {original_link}")
-        logger.info(f"{'='*70}\n")
+        logger.info(f"✅ Ссылка отправлена\n")
     else:
         await context.bot.send_message(
             chat_id=message.chat_id,
-            text="❌ Ошибка при генерации ссылки",
-            parse_mode='Markdown'
+            text="Ошибка при генерации ссылки"
         )
-        logger.error(f"❌ Не удалось сгенерировать ссылку")
-        logger.info(f"{'='*70}\n")
+        logger.error(f"❌ Ошибка\n")
 
 # ════════════════════════════════════════════════════════════════════
 # ГЛАВНЫЙ ОБРАБОТЧИК
 # ════════════════════════════════════════════════════════════════════
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ГЛАВНЫЙ ОБРАБОТЧИК - ВЫБИРАЕТ РЕЖИМ"""
+    """ГЛАВНЫЙ ОБРАБОТЧИК"""
     
     try:
         message = update.message
@@ -479,56 +416,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"📨 НОВОЕ СООБЩЕНИЕ")
         logger.info(f"{'='*70}")
         
-        # ════════════════════════════════════════════════════════════════
-        # ЕСЛИ ПЕРЕСЛАНО - ОПРЕДЕЛЯЕМ ИЗ КАКОЙ ГРУППЫ
-        # ════════════════════════════════════════════════════════════════
-        
         if source_info['is_forwarded']:
             source_username = source_info['source_chat_username']
             
-            logger.info(f"✅ Сообщение ПЕРЕСЛАНО")
+            logger.info(f"✅ ПЕРЕСЛАНО")
             logger.info(f"📍 Из: {source_username or source_info['source_chat_title']}")
             
-            # ВАРИАНТ 1: Из группы-источника → ОБРАБОТКА
+            # Из источника → ОБРАБОТКА
             if source_username and source_username in SOURCE_CHANNELS:
-                logger.info(f"✅ Это источник (@{source_username}) → РЕЖИМ ОБРАБОТКИ")
+                logger.info(f"✅ Источник (@{source_username})")
                 await handle_announcement_processing(update, context, source_info)
             
-            # ВАРИАНТ 2: Из группы модерации → ПОИСК ОРИГИНАЛА
-            elif MODERATION_GROUP_ID != 0 and source_info['source_chat_id'] == MODERATION_GROUP_ID:
-                logger.info(f"✅ Это группа модерации → РЕЖИМ ПОИСКА")
-                await handle_original_search(update, context, source_info)
-            
-            # ВАРИАНТ 3: Из других источников → ПОИСК ОРИГИНАЛА
+            # Иначе → ПОИСК
             else:
-                logger.info(f"📍 Другой источник → РЕЖИМ ПОИСКА")
+                logger.info(f"📍 Другой источник")
                 await handle_original_search(update, context, source_info)
-        
-        # ════════════════════════════════════════════════════════════════
-        # ЕСЛИ НЕ ПЕРЕСЛАНО - СПРАВКА
-        # ════════════════════════════════════════════════════════════════
         
         else:
-            logger.info(f"⚠️  Не переслано → Справка")
+            logger.info(f"⚠️  Не переслано")
             
             help_text = (
-                f"ℹ️ *КАК ПОЛЬЗОВАТЬСЯ*\n\n"
-                f"*РЕЖИМ 1: Обработка объявлений*\n"
-                f"Пересли объявление сюда\n"
-                f"↓\n"
-                f"Бот переделает текст + цену + контакты\n"
-                f"↓\n"
-                f"Опубликует в {TARGET_CHANNEL_NAME}\n\n"
-                f"*РЕЖИМ 2: Поиск оригиналов*\n"
-                f"Менеджер пересылает запрос из модерации\n"
-                f"↓\n"
-                f"Бот находит и отправляет ссылку на оригинал"
+                f"Бот готов работать\n\n"
+                f"1. Пересли объявление - обработаю и опубликую\n"
+                f"2. Пересли запрос - найду оригинал"
             )
             
             await context.bot.send_message(
                 chat_id=message.chat_id,
-                text=help_text,
-                parse_mode='Markdown'
+                text=help_text
             )
     
     except Exception as e:
@@ -537,29 +452,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(traceback.format_exc())
 
 # ════════════════════════════════════════════════════════════════════
-# КОМАНДА /START
+# /START - ИСПРАВЛЕНА ОШИБКА MARKDOWN
 # ════════════════════════════════════════════════════════════════════
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
+    """Команда /start - БЕЗ MARKDOWN ОШИБОК"""
     try:
         start_text = (
-            f"🚀 *PROAUTO BOT v5*\n\n"
-            f"*ПОЛНЫЙ ФУНКЦИОНАЛ:*\n\n"
-            f"*1️⃣ ОБРАБОТКА ОБЪЯВЛЕНИЙ*\n"
-            f"Переслай объявление\n"
-            f"Бот переделает текст, цену, контакты\n"
-            f"Опубликует в {TARGET_CHANNEL_NAME}\n\n"
-            f"*2️⃣ ПОИСК ОРИГИНАЛОВ*\n"
-            f"Пересли запрос менеджера\n"
-            f"Бот найдет оригинал\n"
-            f"Отправит ссылку\n\n"
-            f"✅ Готово к работе!"
+            f"PROAUTO BOT v5.1\n\n"
+            f"ФУНКЦИИ:\n"
+            f"1. Обработка объявлений\n"
+            f"2. Поиск оригиналов\n\n"
+            f"Пересли объявление - я его обработаю"
         )
         
-        await update.message.reply_text(start_text, parse_mode='Markdown')
+        await update.message.reply_text(start_text)
     except Exception as e:
-        logger.error(f"Ошибка в /start: {e}")
+        logger.error(f"Ошибка /start: {e}")
 
 # ════════════════════════════════════════════════════════════════════
 # ИНИЦИАЛИЗАЦИЯ
@@ -568,23 +477,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     """Инициализация"""
     logger.info(f"\n{'='*70}")
-    logger.info(f"🚀 PROAUTO BOT v5 - ЗАПУСК")
+    logger.info(f"🚀 PROAUTO BOT v5.1 - ЗАПУСК")
     logger.info(f"{'='*70}")
-    logger.info(f"📱 @proauto_23_bot")
-    logger.info(f"👨‍💼 Менеджер: {MANAGER_LINK}")
-    logger.info(f"📋 Группа: {TARGET_CHANNEL_NAME}")
-    logger.info(f"💰 Наценка: +{PRICE_ADD:,} ₽")
-    logger.info(f"📊 Источники: {', '.join(SOURCE_CHANNELS)}")
+    logger.info(f"BOT: @proauto_23_bot")
+    logger.info(f"Менеджер: {MANAGER_LINK}")
+    logger.info(f"Группа: {TARGET_CHANNEL_NAME}")
+    logger.info(f"Наценка: +{PRICE_ADD:,} рублей")
+    logger.info(f"Источники: {', '.join(SOURCE_CHANNELS)}")
     logger.info(f"")
-    logger.info(f"✅ ДВА РЕЖИМА РАБОТАЮТ")
+    logger.info(f"✅ ГОТОВО")
     logger.info(f"{'='*70}")
-    logger.info(f"⏳ Ожидаю сообщений...\n")
+    logger.info(f"Ожидаю сообщений...\n")
 
 def main():
     """Запуск"""
     try:
-        logger.info("⏳ Инициализация...")
-        
         app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
         
         app.add_handler(MessageHandler(filters.COMMAND, start_command))
@@ -592,8 +499,6 @@ def main():
             filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
             handle_message
         ))
-        
-        logger.info("✅ Инициализировано\n")
         
         app.run_polling(
             allowed_updates=['message'],
@@ -606,7 +511,7 @@ def main():
         )
         
     except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}")
+        logger.error(f"ОШИБКА: {e}")
         import traceback
         traceback.print_exc()
 
