@@ -193,6 +193,8 @@ def remove_old_contacts(text):
     # Удаляем "В продаже" в начале
     text = re.sub(r'^[\s]*В продаже\s*\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\nВ продаже\s*\n', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'^[\s]*В свободной продаже\s*\n', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\nВ свободной продаже\s*\n', '\n', text, flags=re.IGNORECASE)
     
     # Удаляем фразы типа "Пишите нам", "Звоните", "Свяжитесь"
     for phrase in PHRASES_TO_REMOVE:
@@ -412,13 +414,13 @@ def build_footer(footer_type, pub_id, publication_link):
             f"\n\nДоставка осуществляется во все города РФ\n\n"
             f"По поводу покупки данного автомобиля или подбора:\n"
             f"{manager_link}\n"
-            f"(Ответ в течении 1ч)"
+            f"(Менеджер свяжется с Вами в теч. часа)"
         )
     else:
         footer = (
             f"\n\nРассчитаем стоимость до Вашего дома 🏠 ✅\n"
             f"{manager_link}\n"
-            f"(Ответ в течении 1ч)"
+            f"(Менеджер свяжется с Вами в теч. часа)"
         )
     
     # ID идёт ПОСЛЕ всего
@@ -427,7 +429,8 @@ def build_footer(footer_type, pub_id, publication_link):
     else:
         footer += f"\n\n{pub_id}"
     
-    footer += f"\n\n{channel_link}"
+    order_link = f'<a href="https://t.me/{BOT_USERNAME}">📱 Заказать другое авто — жми сюда</a>'
+    footer += f"\n{order_link}\n\n{channel_link}"
     
     return footer
 
@@ -482,10 +485,10 @@ def format_announcement(original_text, pub_id, publication_link):
 # ВАЛИДАЦИЯ ОБЪЯВЛЕНИЙ
 # ════════════════════════════════════════════════════════════════════
 
-def is_valid_announcement(text, has_photo):
+def is_valid_announcement(text, has_photo, has_video=False):
     """Проверяет валидность объявления"""
-    if not has_photo:
-        return False, "нет фото"
+    if not has_photo and not has_video:
+        return False, "нет медиа"
     
     if not text or len(text) < 20:
         return False, "короткий текст"
@@ -692,7 +695,8 @@ async def handle_announcement(update, context, source_info):
     
     # ───────────────────────────────────────────
     # ОДИНОЧНОЕ СООБЩЕНИЕ
-    valid, reason = is_valid_announcement(text, has_photo)
+    has_video = bool(message.video)
+    valid, reason = is_valid_announcement(text, has_photo or has_video)
     if not valid:
         logger.info(f"⏭️ {reason}")
         return
@@ -714,6 +718,13 @@ async def handle_announcement(update, context, source_info):
                 caption=formatted,
                 parse_mode='HTML'
             )
+        elif message.video:
+            sent = await context.bot.send_video(
+                chat_id=TARGET_GROUP_ID,
+                video=message.video.file_id,
+                caption=formatted,
+                parse_mode='HTML'
+            )
         else:
             sent = await context.bot.send_message(
                 chat_id=TARGET_GROUP_ID,
@@ -727,7 +738,7 @@ async def handle_announcement(update, context, source_info):
         # Обновляем с правильной ссылкой ID
         new_text = format_announcement(text, pub_id, publication_link)
         try:
-            if message.photo:
+            if message.photo or message.video:
                 await context.bot.edit_message_caption(
                     chat_id=TARGET_GROUP_ID,
                     message_id=published_message_id,
@@ -1516,7 +1527,7 @@ async def button_callback(update, context):
         await query.edit_message_text(
             f"💬 <b>Напишите Ваш вопрос менеджеру:</b>\n\n"
             f"📞 <a href='{MANAGER_LINK}'>«Написать менеджеру»</a> 📞 ✅\n"
-            f"(Ответ в течении 1ч)",
+            f"(Менеджер свяжется с Вами в теч. часа)",
             parse_mode='HTML'
         )
         
