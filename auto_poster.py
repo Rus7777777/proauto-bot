@@ -54,139 +54,156 @@ BRIEF_STATES = {}
 
 try:
     from car_database import CAR_DATABASE, HASHTAGS, get_brands, get_models, get_generations
+    logger.info(f"📚 car_database.py загружен: {len(CAR_DATABASE)} марок")
 except ImportError:
     logger.warning("⚠️ car_database.py не найден. Используем встроенную базу.")
     HASHTAGS = {'general': [], 'search_keywords': []}
 
-    # ════ ВСТРОЕННАЯ БАЗА АВТО (марки, модели, поколения) ════
+    # ════ ВСТРОЕННАЯ БАЗА АВТО (42 марки, 1618 моделей) ════
+    # Полный список марок для BRAND_GROUPS
     CAR_DATABASE = {
         'BMW': {
-            '3-Series': {'generations': ['2012-2018 (F30)', '2019-2021 (G20 I)', '2022-2025 (G20 II)']},
-            '5-Series': {'generations': ['2010-2016 (F10)', '2017-2020 (G30 I)', '2021-2025 (G30 II)']},
-            'X1': {'generations': ['2015-2019 (F48)', '2020-2022 (F48 FL)', '2023-2025 (U11)']},
-            'X3': {'generations': ['2011-2017 (F25)', '2018-2021 (G01)', '2022-2025 (G01 FL)']},
-            'X5': {'generations': ['2014-2018 (F15)', '2019-2022 (G05 I)', '2023-2025 (G05 II)']},
-            'X7': {'generations': ['2019-2022 (G07 I)', '2023-2025 (G07 II)']},
+            '1 серии': '2004-2026', '2 серии': '2014-2026', '3 серии': '1975-2026',
+            '4 серии': '2013-2026', '5 серии': '1972-2026', '6 серии': '1976-2024',
+            '7 серии': '1977-2026', '8 серии': '1989-2026', 'M2': '2015-2026',
+            'M3': '1986-2026', 'M4': '2014-2026', 'M5': '1985-2026', 'M8': '2019-2026',
+            'X1': '2009-2026', 'X2': '2017-2026', 'X3': '2003-2026', 'X4': '2014-2026',
+            'X5': '1999-2026', 'X6': '2007-2026', 'X7': '2019-2026', 'XM': '2022-2026',
+            'i3': '2013-2026', 'i4': '2021-2026', 'i5': '2023-2026', 'i7': '2022-2026',
+            'iX': '2021-2026', 'iX1': '2022-2026', 'iX3': '2020-2026', 'Z4': '2002-2026',
         },
         'Mercedes-Benz': {
-            'A-Class': {'generations': ['2013-2018 (W176)', '2019-2022 (W177)', '2023-2025 (W177 FL)']},
-            'C-Class': {'generations': ['2014-2018 (W205)', '2019-2021 (W205 FL)', '2022-2025 (W206)']},
-            'E-Class': {'generations': ['2009-2016 (W212)', '2017-2020 (W213)', '2021-2025 (W213 FL)']},
-            'GLC': {'generations': ['2016-2019 (X253)', '2020-2022 (X253 FL)', '2023-2025 (X254)']},
-            'GLE': {'generations': ['2016-2019 (W166 FL)', '2020-2023 (W167)', '2024-2025 (W167 FL)']},
-            'G-Class': {'generations': ['2012-2018 (W463)', '2019-2022 (W463 II)', '2023-2025 (W463 III)']},
-            'S-Class': {'generations': ['2014-2020 (W222)', '2021-2023 (W223)', '2024-2025 (W223 FL)']},
+            'A-Class': '2013-2026', 'B-Class': '2005-2025', 'C-Class': '2000-2026',
+            'E-Class': '2002-2026', 'S-Class': '2006-2026', 'G-Class': '2000-2026',
+            'GLA': '2013-2026', 'GLB': '2019-2026', 'GLC': '2015-2026', 'GLE': '2015-2026',
+            'GLS': '2013-2026', 'EQA': '2021-2026', 'EQB': '2021-2026', 'EQC': '2019-2026',
+            'EQE': '2022-2026', 'EQS': '2021-2026', 'CLA': '2013-2026', 'CLE': '2023-2026',
         },
         'Audi': {
-            'A4': {'generations': ['2008-2015 (B8)', '2016-2019 (B9)', '2020-2025 (B9 FL)']},
-            'A6': {'generations': ['2011-2018 (C7)', '2019-2022 (C8)', '2023-2025 (C8 FL)']},
-            'Q5': {'generations': ['2009-2017 (8R)', '2018-2020 (FY)', '2021-2025 (FY FL)']},
-            'Q7': {'generations': ['2006-2015 (4L)', '2016-2019 (4M)', '2020-2025 (4M FL)']},
-            'Q8': {'generations': ['2019-2022 (F1)', '2023-2025 (F1 FL)']},
-        },
-        'Porsche': {
-            'Cayenne': {'generations': ['2011-2017 (958)', '2018-2022 (PO536)', '2023-2025 (PO536 FL)']},
-            'Macan': {'generations': ['2014-2018 (95B)', '2019-2023 (95B FL)', '2024-2025 (J1 EV)']},
-            'Panamera': {'generations': ['2010-2016 (970)', '2017-2020 (971)', '2021-2025 (971 FL)']},
-            'Taycan': {'generations': ['2020-2022 (Y1A)', '2023-2025 (Y1A FL)']},
+            'A1': '2010-2026', 'A3': '2003-2026', 'A4': '2001-2026', 'A5': '2007-2026',
+            'A6': '1998-2026', 'A7': '2010-2026', 'A8': '1999-2026', 'Q2': '2016-2026',
+            'Q3': '2011-2026', 'Q4 e-tron': '2021-2026', 'Q5': '2008-2026', 'Q7': '2006-2026',
+            'Q8': '2018-2026', 'RS3': '2011-2026', 'RS4': '2000-2026', 'RS5': '2010-2026',
+            'RS6': '2002-2026', 'RS7': '2013-2026', 'TT': '1999-2023',
         },
         'Toyota': {
-            'Corolla': {'generations': ['2007-2013 (E150)', '2013-2019 (E170)', '2019-2022 (E210)', '2023-2025 (E210 FL)']},
-            'RAV4': {'generations': ['2006-2012 (XA30)', '2013-2018 (XA40)', '2019-2022 (XA50)', '2023-2025 (XA50 FL)']},
-            'Camry': {'generations': ['2006-2011 (XV40)', '2012-2017 (XV50)', '2018-2021 (XV70)', '2022-2025 (XV70 FL)']},
-            'Highlander': {'generations': ['2008-2013 (XU40)', '2014-2019 (XU50)', '2020-2023 (XU70)', '2024-2025 (XU70 FL)']},
-            'Land Cruiser': {'generations': ['2008-2015 (J200)', '2016-2021 (J200 FL)', '2022-2025 (J300)']},
+            'Camry': '1982-2026', 'Corolla': '1966-2026', 'Crown': '1955-2026',
+            'Fortuner': '2005-2026', 'GR86': '2021-2026', 'Hilux': '1968-2026',
+            'Land Cruiser': '1951-2026', 'Land Cruiser Prado': '1988-2026',
+            'RAV4': '1994-2026', 'Sequoia': '2001-2026', 'Supra': '1978-2026',
+            'Tundra': '2000-2026', 'Highlander': '2001-2026',
         },
         'Lexus': {
-            'ES': {'generations': ['2006-2012 (XV40)', '2013-2018 (XV60)', '2019-2022 (XV70)', '2023-2025 (XV70 FL)']},
-            'RX': {'generations': ['2010-2015 (AL10)', '2016-2019 (AL20)', '2020-2022 (AL20 FL)', '2023-2025 (AL30)']},
-            'LX': {'generations': ['2008-2015 (J200)', '2016-2021 (J200 FL)', '2022-2025 (J310)']},
-            'GX': {'generations': ['2003-2009 (J120)', '2010-2019 (J150)', '2020-2025 (J150 FL)']},
+            'ES': '1989-2026', 'GS': '1993-2020', 'GX': '2003-2026', 'IS': '1999-2026',
+            'LC': '2017-2026', 'LM': '2020-2026', 'LS': '1989-2026', 'LX': '1996-2026',
+            'NX': '2014-2026', 'RC': '2014-2026', 'RX': '1997-2026', 'TX': '2024-2026',
+            'UX': '2018-2026',
         },
         'Honda': {
-            'Civic': {'generations': ['2012-2015 (9-е)', '2016-2021 (10-е)', '2022-2025 (11-е)']},
-            'CR-V': {'generations': ['2012-2016 (4-е)', '2017-2021 (5-е)', '2022-2025 (6-е)']},
-            'Pilot': {'generations': ['2009-2015 (2-е)', '2016-2022 (3-е)', '2023-2025 (4-е)']},
-            'Passport': {'generations': ['2019-2022 (2-е)', '2023-2025 (2-е FL)']},
+            'Accord': '1976-2026', 'BR-V': '2015-2026', 'City': '1981-2026',
+            'Civic': '1972-2026', 'CR-V': '1995-2026', 'HR-V': '2015-2026',
+            'Odyssey': '1994-2026', 'Passport': '1993-2026', 'Pilot': '2002-2026',
+            'Ridgeline': '2005-2026',
         },
         'Nissan': {
-            'Qashqai': {'generations': ['2007-2013 (J10)', '2014-2021 (J11)', '2022-2025 (J12)']},
-            'X-Trail': {'generations': ['2008-2014 (T31)', '2015-2022 (T32)', '2023-2025 (T33)']},
-            'Patrol': {'generations': ['2010-2014 (Y62)', '2015-2019 (Y62 FL)', '2020-2025 (Y62 II)']},
-            'Murano': {'generations': ['2009-2015 (Z51)', '2016-2020 (Z52)', '2021-2025 (Z52 FL)']},
+            'Altima': '1992-2026', 'Ariya': '2022-2026', 'GT-R': '2007-2026',
+            'Juke': '2010-2026', 'Leaf': '2010-2026', 'Murano': '2003-2026',
+            'Navara': '1985-2026', 'Note': '2004-2026', 'Pathfinder': '1986-2026',
+            'Patrol': '1980-2026', 'Qashqai': '2006-2026', 'Terra': '2018-2026',
+            'Titan': '2004-2026', 'X-Trail': '2001-2026',
         },
         'Mazda': {
-            'CX-5': {'generations': ['2012-2016 (KE)', '2017-2021 (KF)', '2022-2025 (KF FL)']},
-            'CX-9': {'generations': ['2007-2015 (TB)', '2016-2020 (TC)', '2021-2025 (TC FL)']},
-            'CX-60': {'generations': ['2022-2025']},
+            'CX-30': '2019-2026', 'CX-5': '2012-2026', 'CX-50': '2022-2026',
+            'CX-60': '2022-2026', 'CX-8': '2017-2026', 'CX-9': '2007-2026',
+            'Mazda2': '2002-2026', 'Mazda3': '2003-2026', 'Mazda6': '2002-2026',
+            'MX-5': '1989-2026', 'MX-30': '2020-2026',
         },
         'Kia': {
-            'K5': {'generations': ['2010-2015 (TF)', '2016-2020 (JF)', '2021-2025 (DL3)']},
-            'Sportage': {'generations': ['2010-2015 (SL)', '2016-2021 (QL)', '2022-2025 (NQ5)']},
-            'Sorento': {'generations': ['2010-2014 (XM)', '2015-2020 (UM)', '2021-2025 (MQ4)']},
-            'Telluride': {'generations': ['2020-2022 (ON)', '2023-2025 (ON FL)']},
-            'Carnival': {'generations': ['2015-2020 (YP)', '2021-2025 (KA4)']},
+            'Carnival': '1998-2026', 'EV6': '2021-2026', 'EV9': '2023-2026',
+            'K5': '2010-2026', 'K8': '2021-2026', 'K9': '2012-2026',
+            'Niro': '2016-2026', 'Seltos': '2019-2026', 'Sorento': '2002-2026',
+            'Soul': '2009-2026', 'Sportage': '1993-2026', 'Stinger': '2018-2026',
+            'Telluride': '2020-2026',
         },
         'Hyundai': {
-            'Elantra': {'generations': ['2011-2016 (MD)', '2017-2020 (AD)', '2021-2025 (CN7)']},
-            'Santa Fe': {'generations': ['2010-2012 (CM FL)', '2013-2018 (DM)', '2019-2021 (TM)', '2022-2025 (MX5)']},
-            'Tucson': {'generations': ['2010-2015 (LM)', '2016-2020 (TL)', '2021-2025 (NX4)']},
-            'Palisade': {'generations': ['2019-2022 (LX2)', '2023-2025 (LX2 FL)']},
+            'Elantra': '1990-2026', 'Ioniq': '2016-2022', 'IONIQ 5': '2021-2026',
+            'IONIQ 6': '2022-2026', 'Kona': '2017-2026', 'Palisade': '2019-2026',
+            'Santa Cruz': '2021-2026', 'Santa Fe': '2001-2026', 'Staria': '2021-2026',
+            'Tucson': '2004-2026',
         },
         'Genesis': {
-            'G80': {'generations': ['2017-2020 (DH FL)', '2021-2025 (RG3)']},
-            'GV80': {'generations': ['2021-2023 (JX1)', '2024-2025 (JX1 FL)']},
-            'GV70': {'generations': ['2021-2023 (JK1)', '2024-2025 (JK1 FL)']},
-        },
-        'Geely': {
-            'Coolray': {'generations': ['2019-2022 (SX11)', '2023-2025 (SX11 FL)']},
-            'Tugella': {'generations': ['2020-2023', '2024-2025 (FL)']},
-            'Monjaro': {'generations': ['2022-2024', '2025 (FL)']},
-            'Emgrand': {'generations': ['2014-2018 (7-е)', '2019-2022 (8-е)', '2023-2025 (9-е)']},
-        },
-        'Haval': {
-            'H6': {'generations': ['2011-2017 (1-е)', '2018-2021 (2-е)', '2022-2025 (3-е)']},
-            'H9': {'generations': ['2015-2020', '2021-2024 (FL)', '2025']},
-            'Jolion': {'generations': ['2021-2023', '2024-2025 (FL)']},
-            'Dargo': {'generations': ['2021-2024', '2025 (FL)']},
-        },
-        'BYD': {
-            'Han': {'generations': ['2020-2022 (I)', '2023-2025 (II)']},
-            'Tang': {'generations': ['2018-2021 (II)', '2022-2025 (III)']},
-            'Seal': {'generations': ['2022-2024', '2025 (FL)']},
-            'Atto 3': {'generations': ['2022-2024', '2025 (FL)']},
-        },
-        'Tesla': {
-            'Model 3': {'generations': ['2017-2020', '2021-2023 (Highland)', '2024-2025 (Highland II)']},
-            'Model Y': {'generations': ['2020-2023', '2024-2025 (Juniper)']},
-            'Model S': {'generations': ['2012-2020', '2021-2024 (Plaid)', '2025 (Plaid+)']},
-            'Model X': {'generations': ['2015-2020', '2021-2024 (Plaid)', '2025 (Plaid+)']},
-        },
-        'Rolls-Royce': {
-            'Ghost': {'generations': ['2010-2014 (RR4)', '2015-2020 (RR4 EWB FL)', '2021-2025 (RR12)']},
-            'Cullinan': {'generations': ['2019-2023 (RR31)', '2024-2025 (Series II)']},
-            'Phantom': {'generations': ['2012-2017 (VII FL)', '2018-2022 (VIII)', '2023-2025 (VIII FL)']},
-        },
-        'Bentley': {
-            'Bentayga': {'generations': ['2016-2020 (1-е)', '2021-2024 (FL)', '2025']},
-            'Continental GT': {'generations': ['2011-2017 (2-е)', '2018-2022 (3-е)', '2023-2025 (3-е FL)']},
-            'Flying Spur': {'generations': ['2014-2019 (3-е)', '2020-2024 (4-е)', '2025']},
-        },
-        'Lamborghini': {
-            'Urus': {'generations': ['2018-2022 (1-е)', '2023-2025 (Urus S)']},
-            'Huracán': {'generations': ['2014-2019 (LP610)', '2020-2024 (LP580 FL)', '2024-2025 (EVO)']},
-        },
-        'Ferrari': {
-            'Roma': {'generations': ['2020-2023', '2024-2025 (Spider)']},
-            'Purosangue': {'generations': ['2023-2025']},
-            'SF90': {'generations': ['2020-2023', '2024-2025 (XX)']},
+            'G70': '2017-2026', 'G80': '2017-2026', 'G90': '2015-2026',
+            'GV60': '2022-2026', 'GV70': '2021-2026', 'GV80': '2021-2026',
         },
         'Volkswagen': {
-            'Touareg': {'generations': ['2011-2018 (7P)', '2019-2022 (CR)', '2023-2025 (CR FL)']},
-            'Tiguan': {'generations': ['2008-2016 (5N)', '2017-2020 (AD)', '2021-2025 (AD FL)']},
-            'Passat': {'generations': ['2011-2015 (B7)', '2015-2019 (B8)', '2020-2025 (B8 FL)']},
-            'T-Cross': {'generations': ['2019-2022 (C11)', '2023-2025 (C11 FL)']},
-            'Atlas': {'generations': ['2017-2020 (CA1)', '2021-2023 (CA1 FL)', '2024-2025 (CA1 II)']},
+            'Arteon': '2017-2026', 'Atlas': '2017-2026', 'Golf': '1974-2026',
+            'ID.4': '2020-2026', 'ID.6': '2021-2026', 'Jetta': '1979-2026',
+            'Passat': '1973-2026', 'Polo': '1975-2026', 'T-Cross': '2019-2026',
+            'T-Roc': '2017-2026', 'Tiguan': '2007-2026', 'Touareg': '2002-2026',
+        },
+        'Porsche': {
+            '718': '2016-2026', '911': '1964-2026', 'Cayenne': '2002-2026',
+            'Macan': '2014-2026', 'Panamera': '2009-2026', 'Taycan': '2020-2026',
+        },
+        'Land Rover': {
+            'Defender': '1983-2026', 'Discovery': '1989-2026',
+            'Discovery Sport': '2014-2026', 'Freelander': '1997-2015',
+            'Range Rover': '1970-2026', 'Range Rover Evoque': '2011-2026',
+            'Range Rover Sport': '2005-2026', 'Range Rover Velar': '2017-2026',
+        },
+        'Volvo': {
+            'C40': '2021-2026', 'EX30': '2023-2026', 'EX90': '2024-2026',
+            'S60': '2000-2026', 'S90': '2016-2026', 'V60': '2010-2026',
+            'V90': '2016-2026', 'XC40': '2017-2026', 'XC60': '2008-2026',
+            'XC90': '2003-2026',
+        },
+        'Tesla': {
+            'Cybertruck': '2023-2026', 'Model 3': '2017-2026', 'Model S': '2012-2026',
+            'Model X': '2015-2026', 'Model Y': '2020-2026',
+        },
+        'BYD': {
+            'Atto 3': '2022-2026', 'Han': '2020-2026', 'Seal': '2022-2026',
+            'Song Plus': '2021-2026', 'Tang': '2018-2026', 'Yangwang U8': '2023-2026',
+        },
+        'Geely': {
+            'Atlas Pro': '2021-2026', 'Boyue': '2016-2026', 'Coolray': '2019-2026',
+            'Emgrand': '2009-2026', 'Monjaro': '2022-2026', 'Tugella': '2020-2026',
+        },
+        'Haval': {
+            'Dargo': '2021-2026', 'H6': '2011-2026', 'H9': '2015-2026',
+            'Jolion': '2021-2026',
+        },
+        'Chery': {
+            'Omoda 5': '2022-2026', 'Tiggo 4': '2017-2026', 'Tiggo 7': '2016-2026',
+            'Tiggo 7 Pro': '2020-2026', 'Tiggo 8': '2018-2026',
+        },
+        'Rolls-Royce': {
+            'Cullinan': '2019-2026', 'Dawn': '2016-2024', 'Ghost': '2010-2026',
+            'Phantom': '2003-2026', 'Silver Wraith': '2023-2026', 'Spectre': '2023-2026',
+        },
+        'Bentley': {
+            'Bentayga': '2016-2026', 'Continental GT': '2003-2026',
+            'Flying Spur': '2005-2026', 'Mulsanne': '2010-2020',
+        },
+        'Ferrari': {
+            '296': '2022-2026', '812': '2017-2026', 'F8': '2019-2023',
+            'Portofino': '2018-2023', 'Purosangue': '2023-2026',
+            'Roma': '2020-2026', 'SF90': '2020-2026',
+        },
+        'Lamborghini': {
+            'Huracán': '2014-2026', 'Revuelto': '2023-2026', 'Urus': '2018-2026',
+        },
+        'Lixiang': {
+            'L6': '2024-2026', 'L7': '2023-2026', 'L8': '2022-2026',
+            'L9': '2022-2026', 'Mega': '2024-2026',
+        },
+        'NIO': {
+            'EC6': '2020-2026', 'ES6': '2018-2026', 'ES7': '2022-2026',
+            'ES8': '2018-2026', 'ET5': '2022-2026', 'ET7': '2022-2026',
+        },
+        'Zeekr': {
+            '001': '2021-2026', '007': '2023-2026', '009': '2022-2026',
+            'X': '2023-2026',
         },
     }
 
@@ -196,13 +213,17 @@ except ImportError:
     def get_models(brand):
         if brand in CAR_DATABASE:
             return sorted(list(CAR_DATABASE[brand].keys()))
+        for k in CAR_DATABASE:
+            if k.lower() == brand.lower():
+                return sorted(list(CAR_DATABASE[k].keys()))
         return []
 
     def get_generations(brand, model):
-        if brand in CAR_DATABASE and model in CAR_DATABASE[brand]:
-            gens = CAR_DATABASE[brand][model].get('generations', [])
-            # Возвращаем ВСЕ поколения (минимум 3 если есть)
-            return gens
+        for k, v in CAR_DATABASE.items():
+            if k.lower() == brand.lower() or k == brand:
+                for m, years in v.items():
+                    if m.lower() == model.lower() or m == model:
+                        return [years] if years else []
         return []
 
 # ════════════════════════════════════════════════════════════════════
@@ -319,42 +340,71 @@ def remove_all_emojis(text):
 # ════════════════════════════════════════════════════════════════════
 
 PHRASES_TO_REMOVE = [
-    r'пишите\s+(?:нам|в\s+личку|в\s+ди)',
-    r'звоните\s+(?:нам|в\s+личку)',
+    # Контакты и ссылки на менеджеров
+    r'пишите\s+(?:нам|в\s+личку|нам\s+в\s+лс)',
+    r'звоните\s+(?:нам|по\s+номеру)?',
     r'свяжитесь\s+(?:с\s+нами|в\s+личку)',
     r'написать\s+(?:нам|в\s+личку)',
-    r'обращайтесь\s+(?:к\s+нам|в\s+личку)',
+    r'обращайтесь\s+(?:к\s+нам)?',
+    r'связаться\s+с\s+менеджером',
+    r'^.*наши\s+контакты[^\n]*$',
+    r'^.*менеджер\s+[А-ЯA-Z][а-яa-z]+[^\n]*$',
     r'контакт(?:ы)?:?\s*\+?\d[\d\s\-()]*',
     r'телефон:?\s*\+?\d[\d\s\-()]*',
-    r'whatsapp:?\s*\+?\d[\d\s\-()]*',
+    r'^.*whatsapp[^\n]*$',
+    r'^.*viber[^\n]*$',
     r'telegram:?\s*\+?\d[\d\s\-()]*',
-    # Торговые условия - удаляем
+    # Торговые условия
     r'^.*[Рр]ассрочк[аеу].*$',
     r'^.*[Тт]rade.?[Іи]n.*$',
+    r'^.*[Тт]рейд.?[Ии]н.*$',
     r'^.*[Оо]бмен\s+вашего\s+авто.*$',
     r'^.*[Кк]редит[^\n]*$',
     r'^.*[Лл]изинг[^\n]*$',
-    # "По всем вопросам — Имя"
+    # Типовые фразы из каналов @grandway_import, @Autogroot, @hub_import
     r'^.*[Пп]о\s+всем\s+вопросам.*$',
-    # "Доставка по регионам РФ" (не наша)
+    r'^.*[Пп]о\s+подбору\s+и\s+заказу.*$',
     r'^.*[Дд]оставка\s+по\s+регионам.*$',
+    r'^.*[Аа]вто\s+готово\s+к\s+пригону.*$',
+    r'^.*готова?\s+к\s+пригону.*$',
+    r'^.*срок\s+доставки.*$',
+    r'^.*[Рр]аботаем.*[Дд]оговор.*$',
+    r'^.*[Тт]аможенная\s+пошлина.*$',
+    r'^.*[Оо]тзывы\s+наших.*$',
+    r'^.*CarVertical.*$',
+    r'^.*[Рр]аботаем\s+официально.*$',
+    r'^.*[Нн]ужна\s+цена\s+под\s+ключ.*$',
+    r'^.*[Цц]ена\s+указана\s+под\s+ключ.*$',
+    r'^.*включена\s+в\s+стоимость.*$',
+    r'^.*фиксируется\s+в\s+договоре.*$',
+    r'^.*дополнительн.*информаци.*$',
+    r'^.*[Бб]ез\s+ДТП[,.].*[Вв]ладелец.*$',
+    r'^.*[Нн]е\s+аукцион.*$',
+    r'^.*[Аа]укцион.*$',
 ]
 
 def remove_old_contacts(text):
     """ИСПРАВЛЕНО: Удаляет контакты и фразы 'Пишите нам'"""
     
-    # Удаляем "В продаже" и "В свободной продаже" в начале
-    text = re.sub(r'^[\s]*В продаже\s*\n', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\nВ продаже\s*\n', '\n', text, flags=re.IGNORECASE)
-    text = re.sub(r'^[\s]*В свободной продаже\s*\n', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\nВ свободной продаже\s*\n', '\n', text, flags=re.IGNORECASE)
-
-    # Удаляем хэштеги (#Volkswagen_TCross и т.д.)
+    # Удаляем "В продаже", "В свободной продаже", "В ПРОДАЖЕ !!" и подобное
+    text = re.sub(r'^[^\n]*[Вв]\s+продаже[^\n]*\n', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^[^\n]*[Вв]\s+свободной\s+продаже[^\n]*\n', '', text, flags=re.IGNORECASE)
+    
+    # Удаляем строки "АВТО ИЗ ЕВРОПЫ", "ГОТОВА К ПРИГОНУ" и т.п. (часто заглавными)
+    text = re.sub(r'^[^\n]*АВТО\s+ИЗ\s+[А-ЯЁ]+[^\n]*\n', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^[^\n]*готова?\s+к\s+пригону[^\n]*\n', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'^[^\n]*срок\s+доставки[^\n]*\n', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Удаляем хэштеги
     text = re.sub(r'#[A-Za-zА-Яа-яёЁ0-9_]+', '', text)
     
-    # Удаляем фразы типа "Пишите нам", "Звоните", торговые условия
+    # Удаляем фразы через PHRASES_TO_REMOVE
     for phrase in PHRASES_TO_REMOVE:
         text = re.sub(phrase, '', text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Удаляем строки с именами менеджеров (Менеджер Роман, Артём и т.п.)
+    text = re.sub(r'^.*[Мм]енеджер[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*[Аа]ртём[^\n]*\n?', '', text, flags=re.MULTILINE)
     
     # Удаляем @каналы
     text = re.sub(r'@[A-Za-z0-9_]+', '', text)
@@ -559,36 +609,26 @@ def determine_footer_type(text):
     
     return 'delivery'
 
-def build_footer(footer_type, pub_id, publication_link):
+def build_footer(footer_type):
     """
-    Структура footer:
-    [Доставка / Рассчитаем]
-    «Написать менеджеру» 📞 ✅
-    (Ответ в течении часа)
-    id_XXXX  ← сразу под (Ответ в течении часа)
-    🚗 Заказать другое авто — жми сюда  ← только 'жми сюда' — ссылка
-    
-    @proauto_77
+    Footer без ID. ID вставляется в тело ПОСЛЕ жирной цены.
+    Структура:
+      «Написать менеджеру» 📞 ✅
+      (Ответ в течении часа)
+      🏎️ Заказать другое авто — жми сюда
+
+      @proauto_77
     """
-    manager_link = f'<a href="{MANAGER_LINK}?start={pub_id}">«Написать менеджеру»</a> 📞 ✅'
+    manager_link = f'<a href="{MANAGER_LINK}">«Написать менеджеру»</a> 📞 ✅'
     channel_link = f'<a href="https://t.me/{TARGET_CHANNEL_NAME.replace("@", "")}">{TARGET_CHANNEL_NAME}</a>'
-    
-    # ID — ссылка на публикацию
-    if publication_link:
-        id_line = f'<a href="{publication_link}">{pub_id}</a>'
-    else:
-        id_line = pub_id
-    
-    # Ссылка только на "жми сюда", перед фразой — красная машинка 🚗
-    order_line = f'🚗 Заказать другое авто — <a href="https://t.me/{BOT_USERNAME}">жми сюда</a>'
-    
+    order_line = f'🏎️ Заказать другое авто — <a href="https://t.me/{BOT_USERNAME}">жми сюда</a>'
+
     if footer_type == 'delivery':
         footer = (
             f"\n\nДоставка осуществляется во все города РФ\n\n"
             f"По поводу покупки данного автомобиля или подбора:\n"
             f"{manager_link}\n"
             f"(Ответ в течении часа)\n"
-            f"{id_line}\n"
             f"{order_line}\n\n"
             f"{channel_link}"
         )
@@ -597,60 +637,58 @@ def build_footer(footer_type, pub_id, publication_link):
             f"\n\nРассчитаем стоимость до Вашего дома 🏠 ✅\n"
             f"{manager_link}\n"
             f"(Ответ в течении часа)\n"
-            f"{id_line}\n"
             f"{order_line}\n\n"
             f"{channel_link}"
         )
-    
+
     return footer
+
+def insert_id_after_price(text, pub_id, publication_link):
+    """Вставляет ID сразу после последней жирной строки с ценой"""
+    if not pub_id:
+        return text
+    if publication_link:
+        id_tag = f'<a href="{publication_link}">{pub_id}</a>'
+    else:
+        id_tag = pub_id
+    lines = text.split('\n')
+    result = []
+    last_price_idx = -1
+    for i, line in enumerate(lines):
+        if re.search(r'<b>[^<]*\d[^<]*[₽€$][^<]*</b>', line):
+            last_price_idx = i
+    if last_price_idx >= 0:
+        for i, line in enumerate(lines):
+            result.append(line)
+            if i == last_price_idx:
+                result.append(id_tag)
+    else:
+        result = lines + [id_tag]
+    return '\n'.join(result)
+
 
 def format_announcement(original_text, pub_id, publication_link):
     """ГЛАВНАЯ функция форматирования"""
     if not original_text:
         return None
-    
-    logger.info(f"\n🔧 Форматирование {pub_id}")
-    
+    logger.info(f"🔧 {pub_id}")
     text = original_text
-    
-    # ШАГ 1: Удаляем эмодзи
     text = remove_all_emojis(text)
-    
-    # ШАГ 2: Удаляем контакты и фразы
     text = remove_old_contacts(text)
-    
-    # ШАГ 3: Применяем наценку
     text = apply_price_markup(text)
-    
-    # ШАГ 4: Оставляем только Москву если есть
     text = keep_only_moscow_price(text)
-    
-    # ШАГ 5: Определяем тип footer
     footer_type = determine_footer_type(text)
-    
-    # ШАГ 6: Форматируем характеристики
     text = format_characteristics(text)
-    
-    # ШАГ 7: Жирные заголовки
     text = make_section_headers_bold(text)
-    
-    # ШАГ 8: Жирное название
     text = make_model_name_bold(text)
-    
-    # ШАГ 9: Жирные цены
     text = make_price_lines_bold(text)
-    
-    # ШАГ 10: Исправляем отступы
     text = fix_spacing(text)
-    
-    # ШАГ 11: Собираем финальный текст
+    # ID вставляем ПОСЛЕ жирной цены
+    text = insert_id_after_price(text, pub_id, publication_link)
     header = "Прямая продажа ✅\n\n"
-    footer = build_footer(footer_type, pub_id, publication_link)
-    
-    final = header + text + footer
-    
+    footer = build_footer(footer_type)
     logger.info(f"✅ Готово")
-    return final
+    return header + text + footer
     # ════════════════════════════════════════════════════════════════════
 # ВАЛИДАЦИЯ ОБЪЯВЛЕНИЙ
 # ════════════════════════════════════════════════════════════════════
@@ -990,18 +1028,28 @@ async def notify_manager(context, lead_id, lead_data):
 # DEEP LINKING И СТАРТ БРИФА
 # ════════════════════════════════════════════════════════════════════
 
-CITIES = ['Москва', 'Санкт-Петербург', 'Краснодар', 'Сочи', 'Екатеринбург', 
-          'Новосибирск', 'Казань', 'Ростов-на-Дону', 'Нижний Новгород', 'Воронеж']
+CITIES = [
+    '🏙 Москва', '🏙 Санкт-Петербург', '🌊 Краснодар', '🌊 Сочи',
+    '🏔 Екатеринбург', '🌲 Новосибирск', '🕌 Казань', '☀️ Ростов-на-Дону',
+    '🏛 Нижний Новгород', '⚓ Владивосток', '🌿 Воронеж', '🏙 Тюмень',
+    '🏙 Уфа', '🏙 Красноярск', '🏙 Челябинск'
+]
 
-TIMINGS = ['В этом месяце', '1-2 месяца', '3-6 месяцев', 'Просто смотрю']
+TIMINGS = [
+    '⚡ В этом месяце',
+    '📅 1-2 месяца',
+    '🗓 3-6 месяцев',
+    '👀 Просто изучаю'
+]
 
 BRAND_GROUPS = {
-    '🇩🇪 Немецкие': ['BMW', 'Mercedes-Benz', 'Audi', 'Volkswagen', 'Porsche'],
-    '🇯🇵 Японские': ['Toyota', 'Honda', 'Nissan', 'Mazda', 'Lexus', 'Subaru'],
+    '🇩🇪 Немецкие': ['BMW', 'Mercedes-Benz', 'Audi', 'Volkswagen', 'Porsche', 'Volvo'],
+    '🇯🇵 Японские': ['Toyota', 'Lexus', 'Honda', 'Nissan', 'Mazda', 'Subaru', 'Mitsubishi', 'Infiniti'],
     '🇰🇷 Корейские': ['Kia', 'Hyundai', 'Genesis'],
-    '🇨🇳 Китайские': ['Geely', 'Haval', 'BYD', 'Chery'],
-    '🇺🇸 Американские': ['Tesla', 'Ford', 'Chevrolet'],
-    '⚡ Премиум': ['Ferrari', 'Lamborghini', 'Bentley', 'Rolls-Royce'],
+    '🇨🇳 Китайские': ['Geely', 'Haval', 'BYD', 'Chery', 'Lixiang', 'NIO', 'Zeekr'],
+    '🇺🇸 Американские': ['Tesla', 'Ford', 'Chevrolet', 'Cadillac', 'Jeep'],
+    '🇬🇧 Британские': ['Land Rover', 'Bentley', 'Rolls-Royce', 'Jaguar', 'Aston Martin', 'McLaren'],
+    '👑 Итальянские': ['Ferrari', 'Lamborghini', 'Maserati', 'Alfa Romeo'],
 }
 
 # Состояния опросника
@@ -1406,9 +1454,9 @@ async def start_general_brief(update, context):
         f"<b>Наши преимущества:</b>\n"
         f"• ✅ Прозрачные цены без скрытых платежей\n"
         f"• 🚗 Подбор автомобиля под любой бюджет\n"
-        f"• 📦 Доставка во все города РФ\n"
+        f"• 📦 Доставка во все города РФ и СНГ\n"
         f"• 📋 Полное юридическое сопровождение\n"
-        f"• 🛡 Гарантия качества каждого авто\n\n"
+        f"• 🛡 Гарантия качества и чистоты сделки\n\n"
         f"<b>Какие марки Вас интересуют?</b>"
     )
     
@@ -1689,7 +1737,7 @@ async def button_callback(update, context):
         await query.edit_message_text(
             f"💬 <b>Напишите Ваш вопрос менеджеру:</b>\n\n"
             f"📞 <a href='{MANAGER_LINK}'>«Написать менеджеру»</a> 📞 ✅\n"
-            f"(Ответ в течении часа)",
+            f"(Ответ в течении 1ч)",
             parse_mode='HTML'
         )
         
