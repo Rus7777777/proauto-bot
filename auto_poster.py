@@ -55,12 +55,155 @@ BRIEF_STATES = {}
 try:
     from car_database import CAR_DATABASE, HASHTAGS, get_brands, get_models, get_generations
 except ImportError:
-    logger.warning("⚠️ car_database.py не найден. Используем встроенные данные.")
-    CAR_DATABASE = {}
+    logger.warning("⚠️ car_database.py не найден. Используем встроенную базу.")
     HASHTAGS = {'general': [], 'search_keywords': []}
-    def get_brands(): return []
-    def get_models(b): return []
-    def get_generations(b, m): return []
+
+    # ════ ВСТРОЕННАЯ БАЗА АВТО (марки, модели, поколения) ════
+    CAR_DATABASE = {
+        'BMW': {
+            '3-Series': {'generations': ['2012-2018 (F30)', '2019-2021 (G20 I)', '2022-2025 (G20 II)']},
+            '5-Series': {'generations': ['2010-2016 (F10)', '2017-2020 (G30 I)', '2021-2025 (G30 II)']},
+            'X1': {'generations': ['2015-2019 (F48)', '2020-2022 (F48 FL)', '2023-2025 (U11)']},
+            'X3': {'generations': ['2011-2017 (F25)', '2018-2021 (G01)', '2022-2025 (G01 FL)']},
+            'X5': {'generations': ['2014-2018 (F15)', '2019-2022 (G05 I)', '2023-2025 (G05 II)']},
+            'X7': {'generations': ['2019-2022 (G07 I)', '2023-2025 (G07 II)']},
+        },
+        'Mercedes-Benz': {
+            'A-Class': {'generations': ['2013-2018 (W176)', '2019-2022 (W177)', '2023-2025 (W177 FL)']},
+            'C-Class': {'generations': ['2014-2018 (W205)', '2019-2021 (W205 FL)', '2022-2025 (W206)']},
+            'E-Class': {'generations': ['2009-2016 (W212)', '2017-2020 (W213)', '2021-2025 (W213 FL)']},
+            'GLC': {'generations': ['2016-2019 (X253)', '2020-2022 (X253 FL)', '2023-2025 (X254)']},
+            'GLE': {'generations': ['2016-2019 (W166 FL)', '2020-2023 (W167)', '2024-2025 (W167 FL)']},
+            'G-Class': {'generations': ['2012-2018 (W463)', '2019-2022 (W463 II)', '2023-2025 (W463 III)']},
+            'S-Class': {'generations': ['2014-2020 (W222)', '2021-2023 (W223)', '2024-2025 (W223 FL)']},
+        },
+        'Audi': {
+            'A4': {'generations': ['2008-2015 (B8)', '2016-2019 (B9)', '2020-2025 (B9 FL)']},
+            'A6': {'generations': ['2011-2018 (C7)', '2019-2022 (C8)', '2023-2025 (C8 FL)']},
+            'Q5': {'generations': ['2009-2017 (8R)', '2018-2020 (FY)', '2021-2025 (FY FL)']},
+            'Q7': {'generations': ['2006-2015 (4L)', '2016-2019 (4M)', '2020-2025 (4M FL)']},
+            'Q8': {'generations': ['2019-2022 (F1)', '2023-2025 (F1 FL)']},
+        },
+        'Porsche': {
+            'Cayenne': {'generations': ['2011-2017 (958)', '2018-2022 (PO536)', '2023-2025 (PO536 FL)']},
+            'Macan': {'generations': ['2014-2018 (95B)', '2019-2023 (95B FL)', '2024-2025 (J1 EV)']},
+            'Panamera': {'generations': ['2010-2016 (970)', '2017-2020 (971)', '2021-2025 (971 FL)']},
+            'Taycan': {'generations': ['2020-2022 (Y1A)', '2023-2025 (Y1A FL)']},
+        },
+        'Toyota': {
+            'Corolla': {'generations': ['2007-2013 (E150)', '2013-2019 (E170)', '2019-2022 (E210)', '2023-2025 (E210 FL)']},
+            'RAV4': {'generations': ['2006-2012 (XA30)', '2013-2018 (XA40)', '2019-2022 (XA50)', '2023-2025 (XA50 FL)']},
+            'Camry': {'generations': ['2006-2011 (XV40)', '2012-2017 (XV50)', '2018-2021 (XV70)', '2022-2025 (XV70 FL)']},
+            'Highlander': {'generations': ['2008-2013 (XU40)', '2014-2019 (XU50)', '2020-2023 (XU70)', '2024-2025 (XU70 FL)']},
+            'Land Cruiser': {'generations': ['2008-2015 (J200)', '2016-2021 (J200 FL)', '2022-2025 (J300)']},
+        },
+        'Lexus': {
+            'ES': {'generations': ['2006-2012 (XV40)', '2013-2018 (XV60)', '2019-2022 (XV70)', '2023-2025 (XV70 FL)']},
+            'RX': {'generations': ['2010-2015 (AL10)', '2016-2019 (AL20)', '2020-2022 (AL20 FL)', '2023-2025 (AL30)']},
+            'LX': {'generations': ['2008-2015 (J200)', '2016-2021 (J200 FL)', '2022-2025 (J310)']},
+            'GX': {'generations': ['2003-2009 (J120)', '2010-2019 (J150)', '2020-2025 (J150 FL)']},
+        },
+        'Honda': {
+            'Civic': {'generations': ['2012-2015 (9-е)', '2016-2021 (10-е)', '2022-2025 (11-е)']},
+            'CR-V': {'generations': ['2012-2016 (4-е)', '2017-2021 (5-е)', '2022-2025 (6-е)']},
+            'Pilot': {'generations': ['2009-2015 (2-е)', '2016-2022 (3-е)', '2023-2025 (4-е)']},
+            'Passport': {'generations': ['2019-2022 (2-е)', '2023-2025 (2-е FL)']},
+        },
+        'Nissan': {
+            'Qashqai': {'generations': ['2007-2013 (J10)', '2014-2021 (J11)', '2022-2025 (J12)']},
+            'X-Trail': {'generations': ['2008-2014 (T31)', '2015-2022 (T32)', '2023-2025 (T33)']},
+            'Patrol': {'generations': ['2010-2014 (Y62)', '2015-2019 (Y62 FL)', '2020-2025 (Y62 II)']},
+            'Murano': {'generations': ['2009-2015 (Z51)', '2016-2020 (Z52)', '2021-2025 (Z52 FL)']},
+        },
+        'Mazda': {
+            'CX-5': {'generations': ['2012-2016 (KE)', '2017-2021 (KF)', '2022-2025 (KF FL)']},
+            'CX-9': {'generations': ['2007-2015 (TB)', '2016-2020 (TC)', '2021-2025 (TC FL)']},
+            'CX-60': {'generations': ['2022-2025']},
+        },
+        'Kia': {
+            'K5': {'generations': ['2010-2015 (TF)', '2016-2020 (JF)', '2021-2025 (DL3)']},
+            'Sportage': {'generations': ['2010-2015 (SL)', '2016-2021 (QL)', '2022-2025 (NQ5)']},
+            'Sorento': {'generations': ['2010-2014 (XM)', '2015-2020 (UM)', '2021-2025 (MQ4)']},
+            'Telluride': {'generations': ['2020-2022 (ON)', '2023-2025 (ON FL)']},
+            'Carnival': {'generations': ['2015-2020 (YP)', '2021-2025 (KA4)']},
+        },
+        'Hyundai': {
+            'Elantra': {'generations': ['2011-2016 (MD)', '2017-2020 (AD)', '2021-2025 (CN7)']},
+            'Santa Fe': {'generations': ['2010-2012 (CM FL)', '2013-2018 (DM)', '2019-2021 (TM)', '2022-2025 (MX5)']},
+            'Tucson': {'generations': ['2010-2015 (LM)', '2016-2020 (TL)', '2021-2025 (NX4)']},
+            'Palisade': {'generations': ['2019-2022 (LX2)', '2023-2025 (LX2 FL)']},
+        },
+        'Genesis': {
+            'G80': {'generations': ['2017-2020 (DH FL)', '2021-2025 (RG3)']},
+            'GV80': {'generations': ['2021-2023 (JX1)', '2024-2025 (JX1 FL)']},
+            'GV70': {'generations': ['2021-2023 (JK1)', '2024-2025 (JK1 FL)']},
+        },
+        'Geely': {
+            'Coolray': {'generations': ['2019-2022 (SX11)', '2023-2025 (SX11 FL)']},
+            'Tugella': {'generations': ['2020-2023', '2024-2025 (FL)']},
+            'Monjaro': {'generations': ['2022-2024', '2025 (FL)']},
+            'Emgrand': {'generations': ['2014-2018 (7-е)', '2019-2022 (8-е)', '2023-2025 (9-е)']},
+        },
+        'Haval': {
+            'H6': {'generations': ['2011-2017 (1-е)', '2018-2021 (2-е)', '2022-2025 (3-е)']},
+            'H9': {'generations': ['2015-2020', '2021-2024 (FL)', '2025']},
+            'Jolion': {'generations': ['2021-2023', '2024-2025 (FL)']},
+            'Dargo': {'generations': ['2021-2024', '2025 (FL)']},
+        },
+        'BYD': {
+            'Han': {'generations': ['2020-2022 (I)', '2023-2025 (II)']},
+            'Tang': {'generations': ['2018-2021 (II)', '2022-2025 (III)']},
+            'Seal': {'generations': ['2022-2024', '2025 (FL)']},
+            'Atto 3': {'generations': ['2022-2024', '2025 (FL)']},
+        },
+        'Tesla': {
+            'Model 3': {'generations': ['2017-2020', '2021-2023 (Highland)', '2024-2025 (Highland II)']},
+            'Model Y': {'generations': ['2020-2023', '2024-2025 (Juniper)']},
+            'Model S': {'generations': ['2012-2020', '2021-2024 (Plaid)', '2025 (Plaid+)']},
+            'Model X': {'generations': ['2015-2020', '2021-2024 (Plaid)', '2025 (Plaid+)']},
+        },
+        'Rolls-Royce': {
+            'Ghost': {'generations': ['2010-2014 (RR4)', '2015-2020 (RR4 EWB FL)', '2021-2025 (RR12)']},
+            'Cullinan': {'generations': ['2019-2023 (RR31)', '2024-2025 (Series II)']},
+            'Phantom': {'generations': ['2012-2017 (VII FL)', '2018-2022 (VIII)', '2023-2025 (VIII FL)']},
+        },
+        'Bentley': {
+            'Bentayga': {'generations': ['2016-2020 (1-е)', '2021-2024 (FL)', '2025']},
+            'Continental GT': {'generations': ['2011-2017 (2-е)', '2018-2022 (3-е)', '2023-2025 (3-е FL)']},
+            'Flying Spur': {'generations': ['2014-2019 (3-е)', '2020-2024 (4-е)', '2025']},
+        },
+        'Lamborghini': {
+            'Urus': {'generations': ['2018-2022 (1-е)', '2023-2025 (Urus S)']},
+            'Huracán': {'generations': ['2014-2019 (LP610)', '2020-2024 (LP580 FL)', '2024-2025 (EVO)']},
+        },
+        'Ferrari': {
+            'Roma': {'generations': ['2020-2023', '2024-2025 (Spider)']},
+            'Purosangue': {'generations': ['2023-2025']},
+            'SF90': {'generations': ['2020-2023', '2024-2025 (XX)']},
+        },
+        'Volkswagen': {
+            'Touareg': {'generations': ['2011-2018 (7P)', '2019-2022 (CR)', '2023-2025 (CR FL)']},
+            'Tiguan': {'generations': ['2008-2016 (5N)', '2017-2020 (AD)', '2021-2025 (AD FL)']},
+            'Passat': {'generations': ['2011-2015 (B7)', '2015-2019 (B8)', '2020-2025 (B8 FL)']},
+            'T-Cross': {'generations': ['2019-2022 (C11)', '2023-2025 (C11 FL)']},
+            'Atlas': {'generations': ['2017-2020 (CA1)', '2021-2023 (CA1 FL)', '2024-2025 (CA1 II)']},
+        },
+    }
+
+    def get_brands():
+        return sorted(list(CAR_DATABASE.keys()))
+
+    def get_models(brand):
+        if brand in CAR_DATABASE:
+            return sorted(list(CAR_DATABASE[brand].keys()))
+        return []
+
+    def get_generations(brand, model):
+        if brand in CAR_DATABASE and model in CAR_DATABASE[brand]:
+            gens = CAR_DATABASE[brand][model].get('generations', [])
+            # Возвращаем ВСЕ поколения (минимум 3 если есть)
+            return gens
+        return []
 
 # ════════════════════════════════════════════════════════════════════
 # ПРАВА ПОЛЬЗОВАТЕЛЕЙ
@@ -185,20 +328,33 @@ PHRASES_TO_REMOVE = [
     r'телефон:?\s*\+?\d[\d\s\-()]*',
     r'whatsapp:?\s*\+?\d[\d\s\-()]*',
     r'telegram:?\s*\+?\d[\d\s\-()]*',
+    # Торговые условия - удаляем
+    r'^.*[Рр]ассрочк[аеу].*$',
+    r'^.*[Тт]rade.?[Іи]n.*$',
+    r'^.*[Оо]бмен\s+вашего\s+авто.*$',
+    r'^.*[Кк]редит[^\n]*$',
+    r'^.*[Лл]изинг[^\n]*$',
+    # "По всем вопросам — Имя"
+    r'^.*[Пп]о\s+всем\s+вопросам.*$',
+    # "Доставка по регионам РФ" (не наша)
+    r'^.*[Дд]оставка\s+по\s+регионам.*$',
 ]
 
 def remove_old_contacts(text):
     """ИСПРАВЛЕНО: Удаляет контакты и фразы 'Пишите нам'"""
     
-    # Удаляем "В продаже" в начале
+    # Удаляем "В продаже" и "В свободной продаже" в начале
     text = re.sub(r'^[\s]*В продаже\s*\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\nВ продаже\s*\n', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'^[\s]*В свободной продаже\s*\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\nВ свободной продаже\s*\n', '\n', text, flags=re.IGNORECASE)
+
+    # Удаляем хэштеги (#Volkswagen_TCross и т.д.)
+    text = re.sub(r'#[A-Za-zА-Яа-яёЁ0-9_]+', '', text)
     
-    # Удаляем фразы типа "Пишите нам", "Звоните", "Свяжитесь"
+    # Удаляем фразы типа "Пишите нам", "Звоните", торговые условия
     for phrase in PHRASES_TO_REMOVE:
-        text = re.sub(phrase, '', text, flags=re.IGNORECASE)
+        text = re.sub(phrase, '', text, flags=re.IGNORECASE | re.MULTILINE)
     
     # Удаляем @каналы
     text = re.sub(r'@[A-Za-z0-9_]+', '', text)
@@ -404,33 +560,47 @@ def determine_footer_type(text):
     return 'delivery'
 
 def build_footer(footer_type, pub_id, publication_link):
-    """ИСПРАВЛЕНО: ID идёт ПОСЛЕ цены в footer'е"""
+    """
+    Структура footer:
+    [Доставка / Рассчитаем]
+    «Написать менеджеру» 📞 ✅
+    (Ответ в течении часа)
+    id_XXXX  ← сразу под (Ответ в течении часа)
+    🚗 Заказать другое авто — жми сюда  ← только 'жми сюда' — ссылка
     
+    @proauto_77
+    """
     manager_link = f'<a href="{MANAGER_LINK}?start={pub_id}">«Написать менеджеру»</a> 📞 ✅'
     channel_link = f'<a href="https://t.me/{TARGET_CHANNEL_NAME.replace("@", "")}">{TARGET_CHANNEL_NAME}</a>'
+    
+    # ID — ссылка на публикацию
+    if publication_link:
+        id_line = f'<a href="{publication_link}">{pub_id}</a>'
+    else:
+        id_line = pub_id
+    
+    # Ссылка только на "жми сюда", перед фразой — красная машинка 🚗
+    order_line = f'🚗 Заказать другое авто — <a href="https://t.me/{BOT_USERNAME}">жми сюда</a>'
     
     if footer_type == 'delivery':
         footer = (
             f"\n\nДоставка осуществляется во все города РФ\n\n"
             f"По поводу покупки данного автомобиля или подбора:\n"
             f"{manager_link}\n"
-            f"(Менеджер свяжется с Вами в теч. часа)"
+            f"(Ответ в течении часа)\n"
+            f"{id_line}\n"
+            f"{order_line}\n\n"
+            f"{channel_link}"
         )
     else:
         footer = (
             f"\n\nРассчитаем стоимость до Вашего дома 🏠 ✅\n"
             f"{manager_link}\n"
-            f"(Менеджер свяжется с Вами в теч. часа)"
+            f"(Ответ в течении часа)\n"
+            f"{id_line}\n"
+            f"{order_line}\n\n"
+            f"{channel_link}"
         )
-    
-    # ID идёт ПОСЛЕ всего
-    if publication_link:
-        footer += f"\n\n<a href=\"{publication_link}\">{pub_id}</a>"
-    else:
-        footer += f"\n\n{pub_id}"
-    
-    order_link = f'<a href="https://t.me/{BOT_USERNAME}">📱 Заказать другое авто — жми сюда</a>'
-    footer += f"\n{order_link}\n\n{channel_link}"
     
     return footer
 
@@ -485,10 +655,10 @@ def format_announcement(original_text, pub_id, publication_link):
 # ВАЛИДАЦИЯ ОБЪЯВЛЕНИЙ
 # ════════════════════════════════════════════════════════════════════
 
-def is_valid_announcement(text, has_photo, has_video=False):
+def is_valid_announcement(text, has_photo):
     """Проверяет валидность объявления"""
-    if not has_photo and not has_video:
-        return False, "нет медиа"
+    if not has_photo:
+        return False, "нет фото"
     
     if not text or len(text) < 20:
         return False, "короткий текст"
@@ -695,8 +865,7 @@ async def handle_announcement(update, context, source_info):
     
     # ───────────────────────────────────────────
     # ОДИНОЧНОЕ СООБЩЕНИЕ
-    has_video = bool(message.video)
-    valid, reason = is_valid_announcement(text, has_photo or has_video)
+    valid, reason = is_valid_announcement(text, has_photo)
     if not valid:
         logger.info(f"⏭️ {reason}")
         return
@@ -718,13 +887,6 @@ async def handle_announcement(update, context, source_info):
                 caption=formatted,
                 parse_mode='HTML'
             )
-        elif message.video:
-            sent = await context.bot.send_video(
-                chat_id=TARGET_GROUP_ID,
-                video=message.video.file_id,
-                caption=formatted,
-                parse_mode='HTML'
-            )
         else:
             sent = await context.bot.send_message(
                 chat_id=TARGET_GROUP_ID,
@@ -738,7 +900,7 @@ async def handle_announcement(update, context, source_info):
         # Обновляем с правильной ссылкой ID
         new_text = format_announcement(text, pub_id, publication_link)
         try:
-            if message.photo or message.video:
+            if message.photo:
                 await context.bot.edit_message_caption(
                     chat_id=TARGET_GROUP_ID,
                     message_id=published_message_id,
@@ -1242,11 +1404,11 @@ async def start_general_brief(update, context):
         f"Я представляю компанию <b>ProAuto</b> — мы профессионально занимаемся "
         f"подбором и доставкой автомобилей по всей России и СНГ.\n\n"
         f"<b>Наши преимущества:</b>\n"
-        f"• Прозрачные цены без скрытых платежей ✅\n"
-        f"• Подбор автомобиля под любой бюджет\n"
-        f"• Доставка во все города РФ\n"
-        f"• Полное юридическое сопровождение\n"
-        f"• Гарантия качества каждого авто\n\n"
+        f"• ✅ Прозрачные цены без скрытых платежей\n"
+        f"• 🚗 Подбор автомобиля под любой бюджет\n"
+        f"• 📦 Доставка во все города РФ\n"
+        f"• 📋 Полное юридическое сопровождение\n"
+        f"• 🛡 Гарантия качества каждого авто\n\n"
         f"<b>Какие марки Вас интересуют?</b>"
     )
     
@@ -1527,7 +1689,7 @@ async def button_callback(update, context):
         await query.edit_message_text(
             f"💬 <b>Напишите Ваш вопрос менеджеру:</b>\n\n"
             f"📞 <a href='{MANAGER_LINK}'>«Написать менеджеру»</a> 📞 ✅\n"
-            f"(Менеджер свяжется с Вами в теч. часа)",
+            f"(Ответ в течении часа)",
             parse_mode='HTML'
         )
         
