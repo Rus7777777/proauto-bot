@@ -49,6 +49,56 @@ media_groups_cache = {}
 BRIEF_STATES = {}
 
 # ════════════════════════════════════════════════════════════════════
+# ПАТТЕРН ЭМОДЗИ (нужен до всех функций обработки текста)
+# ════════════════════════════════════════════════════════════════════
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "\U0001FA70-\U0001FAFF"
+    "\U00002700-\U000027BF"
+    "\U000024C2-\U0001F251"
+    "\U0001F1E0-\U0001F1FF"
+    "\U00002600-\U000026FF"
+    "]+",
+    flags=re.UNICODE
+)
+
+# ════════════════════════════════════════════════════════════════════
+# БРЕНДЫ И ПАТТЕРНЫ ДЛЯ ИЗВЛЕЧЕНИЯ НАЗВАНИЯ АВТО
+# ════════════════════════════════════════════════════════════════════
+_CAR_BRANDS_FOR_EXTRACT = [
+    'BMW', 'Mercedes', 'Audi', 'Toyota', 'Lexus', 'Honda', 'Nissan',
+    'Mazda', 'Kia', 'Hyundai', 'Volkswagen', 'Porsche', 'Volvo', 'Subaru',
+    'Mitsubishi', 'Infiniti', 'Geely', 'Haval', 'BYD', 'Chery', 'Lixiang',
+    'NIO', 'Zeekr', 'Tesla', 'Rolls', 'Bentley', 'Ferrari', 'Lamborghini',
+    'Land Rover', 'Range Rover', 'Ford', 'Chevrolet', 'Cadillac', 'Jeep',
+    'Genesis', 'Skoda', 'Alfa Romeo', 'Maserati', 'Jaguar', 'Peugeot',
+    'Renault', 'Suzuki', 'RR', 'Acura', 'Buick', 'Dodge', 'Lincoln',
+]
+
+_SKIP_PATTERNS_EXTRACT = [
+    r'прямая\s+продажа',
+    r'в\s+свободной\s+продаже',
+    r'авто\s+из\s+европы',
+    r'авто\s+прибыло',
+    r'авто\s+из\s+',
+    r'автомобиль\s+находится',
+    r'готова?\s+к\s+пригону',
+    r'срок\s+доставки',
+    r'авто\s+готово',
+    r'^цена\b',
+    r'^\s*[-–—]\s*$',
+    r'^\s*$',
+]
+
+# ════════════════════════════════════════════════════════════════════
 # ИМПОРТ БАЗЫ АВТО
 # ════════════════════════════════════════════════════════════════════
 
@@ -283,7 +333,6 @@ def extract_car_details(text):
     Извлекает структурированные данные из текста объявления.
     Используется для обогащения publications.json и будущего API.
     """
-    import re
     details = {
         'car_brand': None,
         'car_model': None,
@@ -432,25 +481,7 @@ def save_lead(lead_id, data):
     # ════════════════════════════════════════════════════════════════════
 # УДАЛЕНИЕ ЭМОДЗИ
 # ════════════════════════════════════════════════════════════════════
-
-EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
-    "\U0001F780-\U0001F7FF"
-    "\U0001F800-\U0001F8FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FA6F"
-    "\U0001FA70-\U0001FAFF"
-    "\U00002700-\U000027BF"
-    "\U000024C2-\U0001F251"
-    "\U0001F1E0-\U0001F1FF"
-    "\U00002600-\U000026FF"
-    "]+",
-    flags=re.UNICODE
-)
+# EMOJI_PATTERN определён выше в блоке констант
 
 def remove_all_emojis(text):
     """Удаляет ВСЕ эмодзи"""
@@ -795,7 +826,6 @@ def build_footer(footer_type, pub_id=None):
 
 def generate_hashtags(text):
     """Генерирует 3-5 релевантных хэштегов на основе текста объявления"""
-    import re
     tags = set()
     
     text_lower = text.lower()
@@ -1989,30 +2019,8 @@ async def button_callback(update, context):
 # ════════════════════════════════════════════════════════════════════
 
 # Бренды для умного извлечения названия авто
-_CAR_BRANDS_FOR_EXTRACT = [
-    'BMW', 'Mercedes', 'Audi', 'Toyota', 'Lexus', 'Honda', 'Nissan',
-    'Mazda', 'Kia', 'Hyundai', 'Volkswagen', 'Porsche', 'Volvo', 'Subaru',
-    'Mitsubishi', 'Infiniti', 'Geely', 'Haval', 'BYD', 'Chery', 'Lixiang',
-    'NIO', 'Zeekr', 'Tesla', 'Rolls', 'Bentley', 'Ferrari', 'Lamborghini',
-    'Land Rover', 'Range Rover', 'Ford', 'Chevrolet', 'Cadillac', 'Jeep',
-    'Genesis', 'Skoda', 'Alfa Romeo', 'Maserati', 'Jaguar', 'Peugeot',
-    'Renault', 'Suzuki', 'RR', 'Acura', 'Buick', 'Dodge', 'Lincoln',
-]
+    # _CAR_BRANDS_FOR_EXTRACT и _SKIP_PATTERNS_EXTRACT определены выше
 
-_SKIP_PATTERNS_EXTRACT = [
-    r'прямая\s+продажа',
-    r'в\s+свободной\s+продаже',
-    r'авто\s+из\s+европы',
-    r'авто\s+прибыло',
-    r'авто\s+из\s+',
-    r'автомобиль\s+находится',
-    r'готова?\s+к\s+пригону',
-    r'срок\s+доставки',
-    r'авто\s+готово',
-    r'^цена\b',
-    r'^\s*[-–—]\s*$',
-    r'^\s*$',
-]
 
 
 def extract_car_name_from_pub(pub_id):
