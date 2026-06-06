@@ -276,16 +276,137 @@ def get_next_publication_id():
     logger.info(f"🆔 Новый ID: {new_id}")
     return new_id
 
+
+
+def extract_car_details(text):
+    """
+    Извлекает структурированные данные из текста объявления.
+    Используется для обогащения publications.json и будущего API.
+    """
+    import re
+    details = {
+        'car_brand': None,
+        'car_model': None,
+        'price': None,
+        'currency': None,
+        'year': None,
+        'mileage': None,
+        'city': None,
+    }
+
+    if not text:
+        return details
+
+    clean = EMOJI_PATTERN.sub('', text)
+
+    # Бренд
+    brands_map = {
+        'BMW': 'BMW', 'Mercedes': 'Mercedes-Benz', 'Audi': 'Audi',
+        'Toyota': 'Toyota', 'Lexus': 'Lexus', 'Honda': 'Honda',
+        'Nissan': 'Nissan', 'Mazda': 'Mazda', 'Kia': 'Kia',
+        'Hyundai': 'Hyundai', 'Volkswagen': 'Volkswagen',
+        'Porsche': 'Porsche', 'Volvo': 'Volvo', 'Geely': 'Geely',
+        'Haval': 'Haval', 'BYD': 'BYD', 'Tesla': 'Tesla',
+        'Ford': 'Ford', 'Chevrolet': 'Chevrolet', 'Rolls': 'Rolls-Royce',
+        'Bentley': 'Bentley', 'Ferrari': 'Ferrari', 'Land Rover': 'Land Rover',
+        'Range Rover': 'Range Rover', 'Genesis': 'Genesis',
+    }
+    for key, brand_name in brands_map.items():
+        if key.lower() in clean.lower():
+            details['car_brand'] = brand_name
+            break
+
+    # Цена и валюта
+    price_match = re.search(
+        r'(\d[\d\s., ]*\d)\s*([₽€$]|руб)',
+        clean
+    )
+    if price_match:
+        try:
+            price_str = re.sub(r'[\s,. ]', '', price_match.group(1))
+            details['price'] = int(price_str)
+            curr = price_match.group(2)
+            details['currency'] = '₽' if curr in ['₽', 'руб'] else curr
+        except:
+            pass
+
+    # Год выпуска
+    year_match = re.search(r'\b(20[0-2]\d)\b', clean)
+    if year_match:
+        details['year'] = int(year_match.group(1))
+
+    # Пробег
+    mileage_match = re.search(
+        r'(\d[\d\s.,]*\d)\s*(?:км|km|тыс\.\s*км)',
+        clean, re.IGNORECASE
+    )
+    if mileage_match:
+        try:
+            m_str = re.sub(r'[\s,.]', '', mileage_match.group(1))
+            details['mileage'] = int(m_str)
+        except:
+            pass
+
+    # Город (из строк с "в Москве", "до Москвы" и т.д.)
+    city_match = re.search(
+        r'(?:в|до|из)\s+(Москв[еа]|Санкт-Петербург[еа]|Краснодар[еа]|Сочи|'
+        r'Екатеринбург[еа]|Новосибирск[еа]|Казан[иь])',
+        clean, re.IGNORECASE
+    )
+    if city_match:
+        details['city'] = city_match.group(1)
+
+    return details
+
 def save_publication(pub_id, **kwargs):
-    """Сохраняет публикацию в БД"""
+    """Сохраняет публикацию с обогащёнными данными для API/сайта."""
     db = load_db(PUBLICATIONS_DB, {'counter': 0, 'publications': {}})
+
+    original = kwargs.get('original_caption', '')
+    details = extract_car_details(original)
+
+    # Название авто — используем extract_car_name_from_pub через текст напрямую
+    car_name_raw = None
+    if original:
+        for line in original.split('\n'):
+            clean = EMOJI_PATTERN.sub('', line).strip()
+            clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
+            if not clean or len(clean) < 3:
+                continue
+            found = False
+            for brand in _CAR_BRANDS_FOR_EXTRACT:
+                if brand.lower() in clean.lower():
+                    name = re.sub(r'\bв\s+продаже\b|\bв\s+наличии\b', '', clean, flags=re.IGNORECASE)
+                    name = re.sub(r'[\u203c!]+', '', name).strip()
+                    if len(name) > 3:
+                        car_name_raw = name[:80]
+                        found = True
+                        break
+            if found:
+                break
+
+    pub_msg_id = kwargs.get('published_message_id')
+    channel = TARGET_CHANNEL_NAME.replace('@', '')
+    telegram_link = f"https://t.me/{channel}/{pub_msg_id}" if pub_msg_id else None
+
+    now = datetime.now()
     db['publications'][pub_id] = {
         **kwargs,
-        'published_at': datetime.now().isoformat(),
-        'expires_at': (datetime.now() + timedelta(days=30)).isoformat()
+        'pub_id': pub_id,
+        'car_brand': details.get('car_brand'),
+        'car_model': car_name_raw,
+        'price': details.get('price'),
+        'currency': details.get('currency'),
+        'year': details.get('year'),
+        'mileage': details.get('mileage'),
+        'city': details.get('city'),
+        'telegram_link': telegram_link,
+        'status': 'active',
+        'published_at': now.isoformat(),
+        'expires_at': (now + timedelta(days=30)).isoformat(),
     }
     save_db(PUBLICATIONS_DB, db)
-    logger.info(f"💾 {pub_id} сохранён")
+    logger.info(f"\U0001f4be {pub_id} | {details.get('car_brand','?')} | {details.get('price','?')}{details.get('currency','')}")
 
 def find_publication(pub_id):
     """Ищет публикацию по ID"""
@@ -402,9 +523,18 @@ def remove_old_contacts(text):
     for phrase in PHRASES_TO_REMOVE:
         text = re.sub(phrase, '', text, flags=re.IGNORECASE | re.MULTILINE)
     
-    # Удаляем строки с именами менеджеров (Менеджер Роман, Артём и т.п.)
+    # Удаляем строки с именами менеджеров
     text = re.sub(r'^.*[Мм]енеджер[^\n]*\n?', '', text, flags=re.MULTILINE)
     text = re.sub(r'^.*[Аа]ртём[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*[Рр]оман[^\n]*\n?', '', text, flags=re.MULTILINE)
+    
+    # Удаляем статусные строки из каналов
+    text = re.sub(r'^.*[Аа]вто\s+прибыло[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*\bСБХ\b[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*[Аа]вто\s+в\s+наличии[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*[Вв]\s+продаже\s*[‼!]+[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*[Гг]отова?\s+к\s+отправке[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*[Дд]оступна?\s+к\s+заказу[^\n]*\n?', '', text, flags=re.MULTILINE)
     
     # Удаляем @каналы
     text = re.sub(r'@[A-Za-z0-9_]+', '', text)
@@ -522,7 +652,7 @@ def is_price_line(line):
     return bool(re.search(r'\d[\d\s.,\u00a0]*\d\s*[₽€$]', line))
 
 def format_characteristics(text):
-    """ИСПРАВЛЕНО: Добавляет буллеты, но НЕ создаёт пустые"""
+    """Форматирует характеристики: буллеты без дублей, без пустых строк"""
     lines = text.split('\n')
     result_lines = []
     
@@ -533,18 +663,30 @@ def format_characteristics(text):
             result_lines.append('')
             continue
         
-        # Уже с буллетом - оставляем
+        # Строка только из двоеточия или пустой буллет — удаляем
+        if re.match(r'^[•\-–—\s:]+$', stripped):
+            continue
+        
+        # Убираем тире/минусы в начале строки (формат "- Год: 2022")
+        stripped = re.sub(r'^[-–—]\s*', '', stripped)
+        
+        if not stripped or re.match(r'^[•\s:]+$', stripped):
+            continue
+        
+        # Уже с буллетом
         if stripped.startswith('•') or stripped.startswith('▪'):
             clean = re.sub(r'^[•▪]\s*', '', stripped)
-            if clean:  # ТОЛЬКО если есть текст!
+            # Убираем тире если осталось после буллета
+            clean = re.sub(r'^[-–—]\s*', '', clean)
+            if clean and not re.match(r'^[\s:]+$', clean):
                 result_lines.append(f'• {clean}')
             continue
         
         # Характеристика "поле: значение"
         if ':' in stripped and not is_section_header(stripped) and not is_price_line(stripped):
             field = stripped.split(':')[0].strip()
-            value = stripped.split(':', 1)[1].strip() if ':' in stripped else ''
-            if len(field) < 40 and value:  # ВАЖНО: есть поле И значение
+            value = stripped.split(':', 1)[1].strip()
+            if len(field) < 40 and value.strip():
                 result_lines.append(f'• {stripped}')
                 continue
         
@@ -585,12 +727,17 @@ def make_price_lines_bold(text):
     return re.sub(pattern, make_bold, text, flags=re.MULTILINE)
 
 def fix_spacing(text):
-    """Исправляет отступы между секциями"""
+    """Исправляет отступы, убирает пустые строки с одним двоеточием"""
+    # Убираем строки-мусор: только двоеточие, только тире, пустые буллеты
+    text = re.sub(r'^\s*[•\-–—]?\s*:\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*[•]\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*[-–—]\s*$', '', text, flags=re.MULTILINE)
+    
     # Убираем 3+ пустых строк
     text = re.sub(r'\n{3,}', '\n\n', text)
     
-    # Перед заголовками секций только одна пустая строка
-    section_headers = ['<b>Комплектация:</b>', '<b>Состояние:</b>', '<b>Состояние автомобиля:</b>']
+    # Перед заголовками секций только одна пустая строка (без пустой строки)
+    section_headers = ['<b>Комплектация:</b>', '<b>Состояние:</b>', '<b>Состояние автомобиля:</b>', '<b>Комплектация и оснащение:</b>']
     for header in section_headers:
         escaped = re.escape(header)
         text = re.sub(rf'\n\n+({escaped})', rf'\n\1', text)
@@ -609,7 +756,7 @@ def determine_footer_type(text):
     
     return 'delivery'
 
-def build_footer(footer_type):
+def build_footer(footer_type, pub_id=None):
     """
     Footer без ID. ID вставляется в тело ПОСЛЕ жирной цены.
     Структура:
@@ -619,7 +766,8 @@ def build_footer(footer_type):
 
       @proauto_77
     """
-    manager_link = f'<a href="{MANAGER_LINK}">«Написать менеджеру»</a> 📞 ✅'
+    start_param = pub_id if pub_id else 'start'
+    manager_link = f'<a href="https://t.me/{BOT_USERNAME}?start={start_param}">«Написать менеджеру»</a> 📞 ✅'
     channel_link = f'<a href="https://t.me/{TARGET_CHANNEL_NAME.replace("@", "")}">{TARGET_CHANNEL_NAME}</a>'
     order_line = f'🏎️ Заказать другое авто — <a href="https://t.me/{BOT_USERNAME}">жми сюда</a>'
 
@@ -642,6 +790,46 @@ def build_footer(footer_type):
         )
 
     return footer
+
+
+
+def generate_hashtags(text):
+    """Генерирует 3-5 релевантных хэштегов на основе текста объявления"""
+    import re
+    tags = set()
+    
+    text_lower = text.lower()
+    
+    # Марки авто → хэштег
+    brand_tags = {
+        'bmw': '#BMW', 'mercedes': '#Mercedes', 'audi': '#Audi',
+        'toyota': '#Toyota', 'lexus': '#Lexus', 'honda': '#Honda',
+        'nissan': '#Nissan', 'mazda': '#Mazda', 'subaru': '#Subaru',
+        'kia': '#Kia', 'hyundai': '#Hyundai', 'genesis': '#Genesis',
+        'volkswagen': '#Volkswagen', 'porsche': '#Porsche', 'volvo': '#Volvo',
+        'geely': '#Geely', 'haval': '#Haval', 'byd': '#BYD', 'chery': '#Chery',
+        'lixiang': '#Lixiang', 'nio': '#NIO', 'zeekr': '#Zeekr',
+        'tesla': '#Tesla', 'rolls': '#RollsRoyce', 'bentley': '#Bentley',
+        'ferrari': '#Ferrari', 'lamborghini': '#Lamborghini',
+        'land rover': '#LandRover', 'range rover': '#RangeRover',
+        'ford': '#Ford', 'chevrolet': '#Chevrolet',
+        'mitsubishi': '#Mitsubishi', 'infiniti': '#Infiniti',
+        'rav4': '#RAV4', 'camry': '#Camry', 'corolla': '#Corolla',
+        'x5': '#BMWX5', 'x7': '#BMWX7', 'x6': '#BMWX6',
+        'cayenne': '#PorscheCayenne',
+    }
+    
+    for keyword, tag in brand_tags.items():
+        if keyword in text_lower:
+            tags.add(tag)
+            if len(tags) >= 3:
+                break
+    
+    # Всегда добавляем базовые теги ProAuto
+    base_tags = ['#авточастно', '#автоподзаказ', '#ProAuto77']
+    
+    result_tags = list(tags)[:2] + base_tags[:3]
+    return ' '.join(result_tags[:5])
 
 def insert_id_after_price(text, pub_id, publication_link):
     """Вставляет ID сразу после последней жирной строки с ценой"""
@@ -686,9 +874,11 @@ def format_announcement(original_text, pub_id, publication_link):
     # ID вставляем ПОСЛЕ жирной цены
     text = insert_id_after_price(text, pub_id, publication_link)
     header = "Прямая продажа ✅\n\n"
-    footer = build_footer(footer_type)
+    footer = build_footer(footer_type, pub_id)
+    # Хэштеги на основе текста объявления
+    hashtags = generate_hashtags(text)
     logger.info(f"✅ Готово")
-    return header + text + footer
+    return header + text + footer + (f"\n\n{hashtags}" if hashtags else "")
     # ════════════════════════════════════════════════════════════════════
 # ВАЛИДАЦИЯ ОБЪЯВЛЕНИЙ
 # ════════════════════════════════════════════════════════════════════
@@ -1010,7 +1200,20 @@ async def notify_manager(context, lead_id, lead_data):
         text += f"• Срок: {lead_data['timing']}\n"
     
     # Контакт
-    text += f"\n💬 <a href='tg://user?id={lead_data['user_id']}'>Написать клиенту</a>"
+    # Кликабельная ссылка на клиента
+    username = lead_data.get('username')
+    first_name = lead_data.get('first_name', 'Клиент')
+    uid = lead_data['user_id']
+
+    if username:
+        # username → ссылка которая работает везде
+        text += f"\n💬 <a href='https://t.me/{username}'>Написать клиенту @{username}</a>"
+    else:
+        # Нет username — используем text_mention (работает в TG через entities)
+        # Формат: упоминание через HTML без username
+        text += f"\n💬 Написать клиенту: "
+        text += f"<a href='tg://user?id={uid}'>{first_name} (нажми)</a>"
+        text += f"\n   ID для поиска: <code>{uid}</code>"
     
     # Отправляем владельцу и менеджеру
     for recipient_id in [OWNER_ID, MANAGER_USER_ID]:
@@ -1412,8 +1615,7 @@ async def start_brief_for_specific_car(update, context, pub_id):
     }
     
     text = (
-        f"🚗 <b>Видим что интересует:</b>\n\n"
-        f"{car_name} ({pub_id})\n\n"
+        f"🚗 <b>{car_name}</b>\n\n"
         f"✅ Отлично! Уточним пару деталей:"
     )
     
@@ -1731,66 +1933,209 @@ async def button_callback(update, context):
     
     if data == "brief_question":
         logger.info("   ❓ Клиент выбрал: У меня другой вопрос")
-        
         state['data']['interest_type'] = 'question'
-        
         await query.edit_message_text(
             f"💬 <b>Напишите Ваш вопрос менеджеру:</b>\n\n"
             f"📞 <a href='{MANAGER_LINK}'>«Написать менеджеру»</a> 📞 ✅\n"
-            f"(Ответ в течении 1ч)",
+            f"(Ответ в течении часа)",
             parse_mode='HTML'
         )
-        
         clear_user_state(user_id)
         return
-    
+
+    # ✍️ КОНСУЛЬТАЦИЯ
+    if data == "brief_consult":
+        logger.info("   ✍️ Клиент выбрал: Консультация")
+        user = query.from_user
+        lead_id = get_next_lead_id()
+        
+        pub_id = state['data'].get('pub_id', '')
+        car_name = state['data'].get('car_name', '')
+        
+        lead_data = {
+            'user_id': user_id,
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'pub_id': pub_id,
+            'car_name': car_name,
+            'interest_type': 'consultation',
+            'city': None,
+            'timing': None,
+        }
+        save_lead(lead_id, lead_data)
+        
+        # Сообщение клиенту
+        await query.edit_message_text(
+            f"✅ <b>Спасибо! Ваша заявка #{lead_id} принята</b>\n\n"
+            f"✍️ Запрос консультации\n\n"
+            f"Менеджер свяжется с Вами в течение 1 часа\n"
+            f"Благодарим за доверие к ProAuto ✅\n\n"
+            f"Наш канал с актуальными предложениями:\n"
+            f"<a href='https://t.me/{TARGET_CHANNEL_NAME.replace('@','')}'>"
+            f"{TARGET_CHANNEL_NAME}</a>",
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+        
+        # Уведомление менеджеру
+        await notify_manager(context, lead_id, lead_data)
+        clear_user_state(user_id)
+        return
+
     logger.warning(f"⚠️ Неизвестная кнопка: {data}")
     # ════════════════════════════════════════════════════════════════════
 # КОМАНДА /START (DEEP LINKING)
 # ════════════════════════════════════════════════════════════════════
 
+# Бренды для умного извлечения названия авто
+_CAR_BRANDS_FOR_EXTRACT = [
+    'BMW', 'Mercedes', 'Audi', 'Toyota', 'Lexus', 'Honda', 'Nissan',
+    'Mazda', 'Kia', 'Hyundai', 'Volkswagen', 'Porsche', 'Volvo', 'Subaru',
+    'Mitsubishi', 'Infiniti', 'Geely', 'Haval', 'BYD', 'Chery', 'Lixiang',
+    'NIO', 'Zeekr', 'Tesla', 'Rolls', 'Bentley', 'Ferrari', 'Lamborghini',
+    'Land Rover', 'Range Rover', 'Ford', 'Chevrolet', 'Cadillac', 'Jeep',
+    'Genesis', 'Skoda', 'Alfa Romeo', 'Maserati', 'Jaguar', 'Peugeot',
+    'Renault', 'Suzuki', 'RR', 'Acura', 'Buick', 'Dodge', 'Lincoln',
+]
+
+_SKIP_PATTERNS_EXTRACT = [
+    r'прямая\s+продажа',
+    r'в\s+свободной\s+продаже',
+    r'авто\s+из\s+европы',
+    r'авто\s+прибыло',
+    r'авто\s+из\s+',
+    r'автомобиль\s+находится',
+    r'готова?\s+к\s+пригону',
+    r'срок\s+доставки',
+    r'авто\s+готово',
+    r'^цена\b',
+    r'^\s*[-–—]\s*$',
+    r'^\s*$',
+]
+
+
+def extract_car_name_from_pub(pub_id):
+    """
+    Умное извлечение названия авто из оригинального текста.
+    Пропускает статусные строки, ищет строку с брендом.
+    """
+    pub = find_publication(pub_id)
+    if not pub:
+        return None
+    original = pub.get('original_caption', '')
+    if not original:
+        return None
+
+    lines = original.split('\n')
+
+    # Приоритет 1: строка содержит известный бренд авто
+    for line in lines:
+        clean = EMOJI_PATTERN.sub('', line).strip()
+        clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
+        if not clean or len(clean) < 3:
+            continue
+        for brand in _CAR_BRANDS_FOR_EXTRACT:
+            if brand.lower() in clean.lower():
+                # Убираем статусные слова из строки
+                name = re.sub(
+                    r'\bв\s+продаже\b|\bв\s+наличии\b|\bпродаю\b',
+                    '', clean, flags=re.IGNORECASE
+                )
+                name = re.sub(r'[‼!🔥]+', '', name).strip()
+                if len(name) > 3:
+                    logger.info(f"   🚗 Бренд найден: [{name[:60]}]")
+                    return name[:80]
+
+    # Приоритет 2: первая нормальная строка без цены и двоеточий
+    for line in lines:
+        clean = EMOJI_PATTERN.sub('', line).strip()
+        clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
+        if not clean or len(clean) < 6 or len(clean) > 100:
+            continue
+        skip = any(
+            re.search(p, clean, re.IGNORECASE)
+            for p in _SKIP_PATTERNS_EXTRACT
+        )
+        if skip:
+            continue
+        if (not re.search(r'[₽€$]|\d{4,}', clean) and
+                ':' not in clean and
+                clean[0].isupper()):
+            logger.info(f"   🚗 Название (fallback): [{clean[:60]}]")
+            return clean[:80]
+
+    return None
+
+
 async def start_command(update, context):
     """Команда /start с поддержкой deep linking"""
     user_id = update.effective_user.id
     args = context.args
-    
     logger.info(f"👤 /start от ID:{user_id}, args: {args}")
-    
-    # Проверяем deep link параметр
+
     if args:
         param = args[0]
-        
-        # ID публикации (id_0001, id_0002...)
+
+        # Deep link из объявления: id_0001, id_0002...
         if param.startswith('id_'):
             logger.info(f"🔗 Deep link: {param}")
-            await start_brief_for_specific_car(update, context, param)
-            return
-        
-        # UTM-метки
-        if param.startswith('utm_'):
-            source = param.replace('utm_', '')
-            logger.info(f"📊 UTM источник: {source}")
+            pub_id = param
+            car_name = extract_car_name_from_pub(pub_id) or 'автомобиль'
+
             state = get_user_state(user_id)
-            state['data']['utm_source'] = source
-    
-    # ───────────────────────────────────────────
-    # ВЛАДЕЛЕЦ / МЕНЕДЖЕР
+            state['step'] = SPECIFIC_ASK_CITY
+            state['data'] = {
+                'pub_id': pub_id,
+                'car_name': car_name,
+                'interest_type': 'specific_car'
+            }
+
+            # Ограничиваем длину названия в кнопке
+            btn_car_name = car_name[:45] if car_name else 'этот автомобиль'
+
+            keyboard = [
+                [InlineKeyboardButton(
+                    f"✅ {btn_car_name}",
+                    callback_data=f"brief_yes_{pub_id}"
+                )],
+                [InlineKeyboardButton(
+                    "🏎️ Другой автомобиль",
+                    callback_data="brief_custom"
+                )],
+                [InlineKeyboardButton(
+                    "✍️ Консультация",
+                    callback_data="brief_consult"
+                )],
+            ]
+
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=(
+                    f"Здравствуйте! 👋\n\n"
+                    f"Большое спасибо за Ваше обращение!\n"
+                    f"Что Вас интересует?"
+                ),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+            return
+
+        if param.startswith('utm_'):
+            state = get_user_state(user_id)
+            state['data']['utm_source'] = param.replace('utm_', '')
+
+    # Владелец / менеджер
     if has_publish_rights(user_id):
-        text = (
-            f"🚀 <b>PROAUTO BOT v10 — Админ-панель</b>\n\n"
-            f"<b>Команды:</b>\n"
+        await update.message.reply_text(
+            f"🚀 <b>PROAUTO BOT v14 — Панель</b>\n\n"
             f"• 📤 Пересылай объявления → публикую в {TARGET_CHANNEL_NAME}\n"
-            f"• 🔎 /export id_XXXX → текст для Авито/ВК/Дром\n"
+            f"• 📹 Фото и видео — оба работают\n"
+            f"• 🔎 /export id_XXXX → текст для площадок\n"
             f"• 📊 /stats → статистика\n"
-            f"• 📋 /leads → последние заявки\n\n"
-            f"<b>Для клиентов:</b>\n"
-            f"• 📱 Пересылай мне объявления → они переходят в бриф\n"
-            f"• 🔗 Ссылка из поста → открывает бриф для конкретного авто"
+            f"• 📋 /leads → заявки",
+            parse_mode='HTML'
         )
-        await update.message.reply_text(text, parse_mode='HTML')
-    
-    # ───────────────────────────────────────────
-    # КЛИЕНТ
     else:
         await start_general_brief(update, context)
 
