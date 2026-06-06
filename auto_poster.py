@@ -57,8 +57,13 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 # Файлы БД
-PUBLICATIONS_DB = 'publications.json'
-LEADS_DB = 'leads.json'
+# Директория для данных (bothost.ru использует /app/data)
+DATA_DIR = os.getenv('DATA_DIR', '/app/data')
+os.makedirs(DATA_DIR, exist_ok=True)  # Создаём если не существует
+
+PUBLICATIONS_DB = os.path.join(DATA_DIR, 'publications.json')
+LEADS_DB = os.path.join(DATA_DIR, 'leads.json')
+
 media_groups_cache = {}
 BRIEF_STATES = {}
 
@@ -2547,12 +2552,7 @@ async def post_init(application):
     logger.info(f"✅ БОТ ГОТОВ К РАБОТЕ\n")
 
 def run_health_server():
-    """
-    Запускает HTTP сервер на PORT (по умолчанию 3000).
-    bothost.ru требует чтобы процесс слушал этот порт —
-    иначе агент пишет 'Operation timed out'.
-    """
-    import threading
+    """HTTP сервер на PORT=3000 для bothost.ru агента"""
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
     class HealthHandler(BaseHTTPRequestHandler):
@@ -2560,68 +2560,79 @@ def run_health_server():
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(b'{"status":"ok","bot":"ProAuto v16"}')
-
+            self.wfile.write(b'{"status":"ok","bot":"ProAuto"}')
         def do_HEAD(self):
             self.send_response(200)
             self.end_headers()
-
-        def log_message(self, format, *args):
-            pass  # Тихий режим — не засоряем логи
+        def log_message(self, *args):
+            pass
 
     port = int(os.getenv('PORT', 3000))
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    print(f"✅ Health server запущен на порту {port}", flush=True)
-    logger.info(f"🌐 Health server: http://0.0.0.0:{port}")
-    server.serve_forever()
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        print(f"🌐 Health server PORT={port} OK", flush=True)
+        server.serve_forever()
+    except Exception as e:
+        print(f"Health server error: {e}", flush=True)
 
 
 def main():
-    """Главная функция запуска бота"""
+    """Запуск бота"""
+    import threading
+
+    print("--- main() start ---", flush=True)
+
+    # 1. Стартуем health server (нужен для bothost.ru)
+    t = threading.Thread(target=run_health_server, daemon=True)
+    t.start()
+    print("--- health thread started ---", flush=True)
+
+    # 2. Проверяем токен
+    if not BOT_TOKEN:
+        print("❌ BOT_TOKEN не задан!", flush=True)
+        import time; time.sleep(9999)  # Держим процесс живым
+        return
+
+    print(f"--- BOT_TOKEN OK ({BOT_TOKEN[:10]}...) ---", flush=True)
+    print(f"--- DATA_DIR={DATA_DIR} ---", flush=True)
+    print(f"--- OWNER_ID={OWNER_ID} ---", flush=True)
+
+    # 3. Строим приложение
     try:
-        import threading
-
-        # Запускаем HTTP health server в фоновом потоке
-        # (bothost.ru требует ответа на PORT=3000)
-        health_thread = threading.Thread(
-            target=run_health_server,
-            daemon=True,
-            name="HealthServer"
-        )
-        health_thread.start()
-
         app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-        
-        # Регистрируем команды
-        app.add_handler(CommandHandler("start", start_command))
-        app.add_handler(CommandHandler("stats", stats_command))
-        app.add_handler(CommandHandler("leads", leads_command))
-        app.add_handler(CommandHandler("export", export_command))
-        
-        # Обработчик кнопок (callback)
-        app.add_handler(CallbackQueryHandler(button_callback))
-        
-        # Обработчик всех остальных сообщений (текст, фото, видео)
-        app.add_handler(MessageHandler(
-            filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
-            handle_message
-        ))
-        
-        logger.info("🔗 Все обработчики подключены")
-        logger.info("⏳ Запуск polling...\n")
-        
-        # Запуск polling
+        print("--- Application built OK ---", flush=True)
+    except Exception as e:
+        print(f"❌ Ошибка создания Application: {e}", flush=True)
+        import traceback; traceback.print_exc()
+        import time; time.sleep(9999)
+        return
+
+    # 4. Регистрируем хендлеры
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("leads", leads_command))
+    app.add_handler(CommandHandler("export", export_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(
+        filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
+        handle_message
+    ))
+    print("--- Handlers registered ---", flush=True)
+
+    # 5. Запускаем polling
+    print("--- Starting polling... ---", flush=True)
+    try:
         app.run_polling(
             allowed_updates=['message', 'callback_query'],
-            drop_pending_updates=True,
+            drop_pending_updates=False,
             poll_interval=1.0,
             timeout=30
         )
-    
+        print("--- Polling stopped ---", flush=True)
     except Exception as e:
-        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Polling error: {e}", flush=True)
+        import traceback; traceback.print_exc()
+        import time; time.sleep(9999)
 
 if __name__ == '__main__':
     main()
