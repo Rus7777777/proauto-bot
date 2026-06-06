@@ -1,2638 +1,1032 @@
 """
-PROAUTO BOT v16
+PROAUTO BOT - AUTO INSTALL VERSION
+Автоматически устанавливает зависимости при старте
 """
-
 import sys
-print("=== PROAUTO BOT v16 ЗАПУСК ===", flush=True)
-print(f"Python: {sys.version}", flush=True)
-
-import asyncio
-import re
-import json
 import os
-from datetime import datetime, timedelta
+import subprocess
 
-print("Базовые модули OK", flush=True)
+print("="*50, flush=True)
+print("PROAUTO BOT СТАРТ", flush=True)
+print(f"Python: {sys.version}", flush=True)
+print(f"PATH: {os.getcwd()}", flush=True)
+print("="*50, flush=True)
+
+# ════════════════════════════════════════════════
+# ШАГ 1: АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
+# ════════════════════════════════════════════════
+def install(package):
+    print(f"Устанавливаю {package}...", flush=True)
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", package,
+         "--break-system-packages", "--quiet"],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print(f"✅ {package} установлен", flush=True)
+    else:
+        print(f"⚠️ {package}: {result.stderr[:200]}", flush=True)
+
+# Проверяем и устанавливаем нужные пакеты
+try:
+    import telegram
+    print(f"✅ python-telegram-bot уже есть: {telegram.__version__}", flush=True)
+except ImportError:
+    print("⚠️ python-telegram-bot не найден, устанавливаю...", flush=True)
+    install("python-telegram-bot>=20.0,<21.0")
+    install("httpx>=0.24.0")
 
 try:
     from dotenv import load_dotenv
-    print("dotenv OK", flush=True)
-except ImportError as e:
-    print(f"ОШИБКА dotenv: {e}", flush=True)
-    sys.exit(1)
+    print("✅ python-dotenv есть", flush=True)
+except ImportError:
+    install("python-dotenv")
+
+# ════════════════════════════════════════════════
+# ШАГ 2: ИМПОРТЫ
+# ════════════════════════════════════════════════
+print("Загружаю модули...", flush=True)
 
 try:
+    import asyncio
+    import re
+    import json
+    import threading
+    from datetime import datetime, timedelta
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    from dotenv import load_dotenv
     from telegram import (
-        Update, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
+        Update, InputMediaPhoto,
+        InlineKeyboardButton, InlineKeyboardMarkup
     )
     from telegram.ext import (
-        Application, ContextTypes, MessageHandler, CommandHandler,
+        Application, MessageHandler, CommandHandler,
         CallbackQueryHandler, filters
     )
-    print("python-telegram-bot OK", flush=True)
-except ImportError as e:
-    print(f"ОШИБКА telegram: {e}", flush=True)
-    print("Установи: pip install python-telegram-bot==20.7.0", flush=True)
-    sys.exit(1)
-
-import logging
-print("Все импорты OK", flush=True)
+    import logging
+    print("✅ Все модули загружены", flush=True)
+except Exception as e:
+    print(f"❌ Ошибка импорта: {e}", flush=True)
+    import time
+    time.sleep(99999)
 
 load_dotenv()
 
-# ════════════════════════════════════════════════════════════════════
-# КОНФИГУРАЦИЯ
-# ════════════════════════════════════════════════════════════════════
-
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-BOT_USERNAME = os.getenv('BOT_USERNAME', 'proauto_23_bot')
+# ════════════════════════════════════════════════
+# ШАГ 3: КОНФИГУРАЦИЯ
+# ════════════════════════════════════════════════
+BOT_TOKEN      = os.getenv('BOT_TOKEN')
+BOT_USERNAME   = os.getenv('BOT_USERNAME', 'proauto_23_bot')
 TARGET_GROUP_ID = int(os.getenv('TARGET_GROUP_ID', '0'))
 TARGET_CHANNEL_NAME = os.getenv('TARGET_CHANNEL_NAME', '@proauto_77')
-MANAGER_LINK = os.getenv('MANAGER_LINK', 'https://t.me/rdblm')
-
-OWNER_ID = int(os.getenv('OWNER_ID', '0'))
+MANAGER_LINK   = os.getenv('MANAGER_LINK', 'https://t.me/rdblm')
+OWNER_ID       = int(os.getenv('OWNER_ID', '0'))
 MANAGER_USER_ID = int(os.getenv('MANAGER_USER_ID', '0'))
+PORT           = int(os.getenv('PORT', 3000))
+DATA_DIR       = os.getenv('DATA_DIR', '/app/data')
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Файлы БД
-# Директория для данных (bothost.ru использует /app/data)
-DATA_DIR = os.getenv('DATA_DIR', '/app/data')
-os.makedirs(DATA_DIR, exist_ok=True)  # Создаём если не существует
+os.makedirs(DATA_DIR, exist_ok=True)
 
 PUBLICATIONS_DB = os.path.join(DATA_DIR, 'publications.json')
-LEADS_DB = os.path.join(DATA_DIR, 'leads.json')
+LEADS_DB        = os.path.join(DATA_DIR, 'leads.json')
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 media_groups_cache = {}
 BRIEF_STATES = {}
 
-# ════════════════════════════════════════════════════════════════════
-# ПАТТЕРН ЭМОДЗИ (нужен до всех функций обработки текста)
-# ════════════════════════════════════════════════════════════════════
+print(f"BOT_TOKEN: {'OK' if BOT_TOKEN else 'ОТСУТСТВУЕТ!'}", flush=True)
+print(f"OWNER_ID: {OWNER_ID}", flush=True)
+print(f"DATA_DIR: {DATA_DIR}", flush=True)
+print(f"PORT: {PORT}", flush=True)
+
+if not BOT_TOKEN:
+    print("❌ BOT_TOKEN не задан! Проверь переменные окружения.", flush=True)
+    import time; time.sleep(99999)
+
+# ════════════════════════════════════════════════
+# КОНСТАНТЫ ДЛЯ ОБРАБОТКИ ТЕКСТА
+# ════════════════════════════════════════════════
 EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
-    "\U0001F780-\U0001F7FF"
-    "\U0001F800-\U0001F8FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FA6F"
-    "\U0001FA70-\U0001FAFF"
-    "\U00002700-\U000027BF"
-    "\U000024C2-\U0001F251"
-    "\U0001F1E0-\U0001F1FF"
-    "\U00002600-\U000026FF"
-    "]+",
+    "[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF\U00002700-\U000027BF"
+    "\U000024C2-\U0001F251\U0001F1E0-\U0001F1FF"
+    "\U00002600-\U000026FF]+",
     flags=re.UNICODE
 )
 
-# ════════════════════════════════════════════════════════════════════
-# БРЕНДЫ И ПАТТЕРНЫ ДЛЯ ИЗВЛЕЧЕНИЯ НАЗВАНИЯ АВТО
-# ════════════════════════════════════════════════════════════════════
-_CAR_BRANDS_FOR_EXTRACT = [
+CAR_BRANDS = [
     'BMW', 'Mercedes', 'Audi', 'Toyota', 'Lexus', 'Honda', 'Nissan',
-    'Mazda', 'Kia', 'Hyundai', 'Volkswagen', 'Porsche', 'Volvo', 'Subaru',
-    'Mitsubishi', 'Infiniti', 'Geely', 'Haval', 'BYD', 'Chery', 'Lixiang',
-    'NIO', 'Zeekr', 'Tesla', 'Rolls', 'Bentley', 'Ferrari', 'Lamborghini',
-    'Land Rover', 'Range Rover', 'Ford', 'Chevrolet', 'Cadillac', 'Jeep',
-    'Genesis', 'Skoda', 'Alfa Romeo', 'Maserati', 'Jaguar', 'Peugeot',
-    'Renault', 'Suzuki', 'RR', 'Acura', 'Buick', 'Dodge', 'Lincoln',
+    'Mazda', 'Kia', 'Hyundai', 'Volkswagen', 'Porsche', 'Volvo',
+    'Subaru', 'Mitsubishi', 'Infiniti', 'Geely', 'Haval', 'BYD',
+    'Chery', 'Lixiang', 'NIO', 'Zeekr', 'Tesla', 'Rolls', 'Bentley',
+    'Ferrari', 'Lamborghini', 'Land Rover', 'Range Rover', 'Ford',
+    'Chevrolet', 'Cadillac', 'Jeep', 'Genesis', 'Skoda', 'Maserati',
 ]
 
-_SKIP_PATTERNS_EXTRACT = [
-    r'прямая\s+продажа',
-    r'в\s+свободной\s+продаже',
-    r'авто\s+из\s+европы',
-    r'авто\s+прибыло',
-    r'авто\s+из\s+',
-    r'автомобиль\s+находится',
-    r'готова?\s+к\s+пригону',
-    r'срок\s+доставки',
-    r'авто\s+готово',
-    r'^цена\b',
-    r'^\s*[-–—]\s*$',
-    r'^\s*$',
+SKIP_STATUS_LINES = [
+    r'прямая\s+продажа', r'в\s+свободной\s+продаже', r'в\s+продаже',
+    r'авто\s+из\s+европы', r'авто\s+прибыло', r'авто\s+из\s+',
+    r'готова?\s+к\s+пригону', r'срок\s+доставки', r'авто\s+готово',
+    r'^\s*[-–—]\s*$', r'^\s*$',
 ]
 
-# ════════════════════════════════════════════════════════════════════
-# ИМПОРТ БАЗЫ АВТО
-# ════════════════════════════════════════════════════════════════════
-
-try:
-    from car_database import CAR_DATABASE, HASHTAGS, get_brands, get_models, get_generations
-    logger.info(f"📚 car_database.py загружен: {len(CAR_DATABASE)} марок")
-except ImportError:
-    logger.warning("⚠️ car_database.py не найден. Используем встроенную базу.")
-    HASHTAGS = {'general': [], 'search_keywords': []}
-
-    # ════ ВСТРОЕННАЯ БАЗА АВТО (42 марки, 1618 моделей) ════
-    # Полный список марок для BRAND_GROUPS
-    CAR_DATABASE = {
-        'BMW': {
-            '1 серии': '2004-2026', '2 серии': '2014-2026', '3 серии': '1975-2026',
-            '4 серии': '2013-2026', '5 серии': '1972-2026', '6 серии': '1976-2024',
-            '7 серии': '1977-2026', '8 серии': '1989-2026', 'M2': '2015-2026',
-            'M3': '1986-2026', 'M4': '2014-2026', 'M5': '1985-2026', 'M8': '2019-2026',
-            'X1': '2009-2026', 'X2': '2017-2026', 'X3': '2003-2026', 'X4': '2014-2026',
-            'X5': '1999-2026', 'X6': '2007-2026', 'X7': '2019-2026', 'XM': '2022-2026',
-            'i3': '2013-2026', 'i4': '2021-2026', 'i5': '2023-2026', 'i7': '2022-2026',
-            'iX': '2021-2026', 'iX1': '2022-2026', 'iX3': '2020-2026', 'Z4': '2002-2026',
-        },
-        'Mercedes-Benz': {
-            'A-Class': '2013-2026', 'B-Class': '2005-2025', 'C-Class': '2000-2026',
-            'E-Class': '2002-2026', 'S-Class': '2006-2026', 'G-Class': '2000-2026',
-            'GLA': '2013-2026', 'GLB': '2019-2026', 'GLC': '2015-2026', 'GLE': '2015-2026',
-            'GLS': '2013-2026', 'EQA': '2021-2026', 'EQB': '2021-2026', 'EQC': '2019-2026',
-            'EQE': '2022-2026', 'EQS': '2021-2026', 'CLA': '2013-2026', 'CLE': '2023-2026',
-        },
-        'Audi': {
-            'A1': '2010-2026', 'A3': '2003-2026', 'A4': '2001-2026', 'A5': '2007-2026',
-            'A6': '1998-2026', 'A7': '2010-2026', 'A8': '1999-2026', 'Q2': '2016-2026',
-            'Q3': '2011-2026', 'Q4 e-tron': '2021-2026', 'Q5': '2008-2026', 'Q7': '2006-2026',
-            'Q8': '2018-2026', 'RS3': '2011-2026', 'RS4': '2000-2026', 'RS5': '2010-2026',
-            'RS6': '2002-2026', 'RS7': '2013-2026', 'TT': '1999-2023',
-        },
-        'Toyota': {
-            'Camry': '1982-2026', 'Corolla': '1966-2026', 'Crown': '1955-2026',
-            'Fortuner': '2005-2026', 'GR86': '2021-2026', 'Hilux': '1968-2026',
-            'Land Cruiser': '1951-2026', 'Land Cruiser Prado': '1988-2026',
-            'RAV4': '1994-2026', 'Sequoia': '2001-2026', 'Supra': '1978-2026',
-            'Tundra': '2000-2026', 'Highlander': '2001-2026',
-        },
-        'Lexus': {
-            'ES': '1989-2026', 'GS': '1993-2020', 'GX': '2003-2026', 'IS': '1999-2026',
-            'LC': '2017-2026', 'LM': '2020-2026', 'LS': '1989-2026', 'LX': '1996-2026',
-            'NX': '2014-2026', 'RC': '2014-2026', 'RX': '1997-2026', 'TX': '2024-2026',
-            'UX': '2018-2026',
-        },
-        'Honda': {
-            'Accord': '1976-2026', 'BR-V': '2015-2026', 'City': '1981-2026',
-            'Civic': '1972-2026', 'CR-V': '1995-2026', 'HR-V': '2015-2026',
-            'Odyssey': '1994-2026', 'Passport': '1993-2026', 'Pilot': '2002-2026',
-            'Ridgeline': '2005-2026',
-        },
-        'Nissan': {
-            'Altima': '1992-2026', 'Ariya': '2022-2026', 'GT-R': '2007-2026',
-            'Juke': '2010-2026', 'Leaf': '2010-2026', 'Murano': '2003-2026',
-            'Navara': '1985-2026', 'Note': '2004-2026', 'Pathfinder': '1986-2026',
-            'Patrol': '1980-2026', 'Qashqai': '2006-2026', 'Terra': '2018-2026',
-            'Titan': '2004-2026', 'X-Trail': '2001-2026',
-        },
-        'Mazda': {
-            'CX-30': '2019-2026', 'CX-5': '2012-2026', 'CX-50': '2022-2026',
-            'CX-60': '2022-2026', 'CX-8': '2017-2026', 'CX-9': '2007-2026',
-            'Mazda2': '2002-2026', 'Mazda3': '2003-2026', 'Mazda6': '2002-2026',
-            'MX-5': '1989-2026', 'MX-30': '2020-2026',
-        },
-        'Kia': {
-            'Carnival': '1998-2026', 'EV6': '2021-2026', 'EV9': '2023-2026',
-            'K5': '2010-2026', 'K8': '2021-2026', 'K9': '2012-2026',
-            'Niro': '2016-2026', 'Seltos': '2019-2026', 'Sorento': '2002-2026',
-            'Soul': '2009-2026', 'Sportage': '1993-2026', 'Stinger': '2018-2026',
-            'Telluride': '2020-2026',
-        },
-        'Hyundai': {
-            'Elantra': '1990-2026', 'Ioniq': '2016-2022', 'IONIQ 5': '2021-2026',
-            'IONIQ 6': '2022-2026', 'Kona': '2017-2026', 'Palisade': '2019-2026',
-            'Santa Cruz': '2021-2026', 'Santa Fe': '2001-2026', 'Staria': '2021-2026',
-            'Tucson': '2004-2026',
-        },
-        'Genesis': {
-            'G70': '2017-2026', 'G80': '2017-2026', 'G90': '2015-2026',
-            'GV60': '2022-2026', 'GV70': '2021-2026', 'GV80': '2021-2026',
-        },
-        'Volkswagen': {
-            'Arteon': '2017-2026', 'Atlas': '2017-2026', 'Golf': '1974-2026',
-            'ID.4': '2020-2026', 'ID.6': '2021-2026', 'Jetta': '1979-2026',
-            'Passat': '1973-2026', 'Polo': '1975-2026', 'T-Cross': '2019-2026',
-            'T-Roc': '2017-2026', 'Tiguan': '2007-2026', 'Touareg': '2002-2026',
-        },
-        'Porsche': {
-            '718': '2016-2026', '911': '1964-2026', 'Cayenne': '2002-2026',
-            'Macan': '2014-2026', 'Panamera': '2009-2026', 'Taycan': '2020-2026',
-        },
-        'Land Rover': {
-            'Defender': '1983-2026', 'Discovery': '1989-2026',
-            'Discovery Sport': '2014-2026', 'Freelander': '1997-2015',
-            'Range Rover': '1970-2026', 'Range Rover Evoque': '2011-2026',
-            'Range Rover Sport': '2005-2026', 'Range Rover Velar': '2017-2026',
-        },
-        'Volvo': {
-            'C40': '2021-2026', 'EX30': '2023-2026', 'EX90': '2024-2026',
-            'S60': '2000-2026', 'S90': '2016-2026', 'V60': '2010-2026',
-            'V90': '2016-2026', 'XC40': '2017-2026', 'XC60': '2008-2026',
-            'XC90': '2003-2026',
-        },
-        'Tesla': {
-            'Cybertruck': '2023-2026', 'Model 3': '2017-2026', 'Model S': '2012-2026',
-            'Model X': '2015-2026', 'Model Y': '2020-2026',
-        },
-        'BYD': {
-            'Atto 3': '2022-2026', 'Han': '2020-2026', 'Seal': '2022-2026',
-            'Song Plus': '2021-2026', 'Tang': '2018-2026', 'Yangwang U8': '2023-2026',
-        },
-        'Geely': {
-            'Atlas Pro': '2021-2026', 'Boyue': '2016-2026', 'Coolray': '2019-2026',
-            'Emgrand': '2009-2026', 'Monjaro': '2022-2026', 'Tugella': '2020-2026',
-        },
-        'Haval': {
-            'Dargo': '2021-2026', 'H6': '2011-2026', 'H9': '2015-2026',
-            'Jolion': '2021-2026',
-        },
-        'Chery': {
-            'Omoda 5': '2022-2026', 'Tiggo 4': '2017-2026', 'Tiggo 7': '2016-2026',
-            'Tiggo 7 Pro': '2020-2026', 'Tiggo 8': '2018-2026',
-        },
-        'Rolls-Royce': {
-            'Cullinan': '2019-2026', 'Dawn': '2016-2024', 'Ghost': '2010-2026',
-            'Phantom': '2003-2026', 'Silver Wraith': '2023-2026', 'Spectre': '2023-2026',
-        },
-        'Bentley': {
-            'Bentayga': '2016-2026', 'Continental GT': '2003-2026',
-            'Flying Spur': '2005-2026', 'Mulsanne': '2010-2020',
-        },
-        'Ferrari': {
-            '296': '2022-2026', '812': '2017-2026', 'F8': '2019-2023',
-            'Portofino': '2018-2023', 'Purosangue': '2023-2026',
-            'Roma': '2020-2026', 'SF90': '2020-2026',
-        },
-        'Lamborghini': {
-            'Huracán': '2014-2026', 'Revuelto': '2023-2026', 'Urus': '2018-2026',
-        },
-        'Lixiang': {
-            'L6': '2024-2026', 'L7': '2023-2026', 'L8': '2022-2026',
-            'L9': '2022-2026', 'Mega': '2024-2026',
-        },
-        'NIO': {
-            'EC6': '2020-2026', 'ES6': '2018-2026', 'ES7': '2022-2026',
-            'ES8': '2018-2026', 'ET5': '2022-2026', 'ET7': '2022-2026',
-        },
-        'Zeekr': {
-            '001': '2021-2026', '007': '2023-2026', '009': '2022-2026',
-            'X': '2023-2026',
-        },
-    }
-
-    def get_brands():
-        return sorted(list(CAR_DATABASE.keys()))
-
-    def get_models(brand):
-        if brand in CAR_DATABASE:
-            return sorted(list(CAR_DATABASE[brand].keys()))
-        for k in CAR_DATABASE:
-            if k.lower() == brand.lower():
-                return sorted(list(CAR_DATABASE[k].keys()))
-        return []
-
-    def get_generations(brand, model):
-        for k, v in CAR_DATABASE.items():
-            if k.lower() == brand.lower() or k == brand:
-                for m, years in v.items():
-                    if m.lower() == model.lower() or m == model:
-                        return [years] if years else []
-        return []
-
-# ════════════════════════════════════════════════════════════════════
-# ПРАВА ПОЛЬЗОВАТЕЛЕЙ
-# ════════════════════════════════════════════════════════════════════
-
-def has_publish_rights(user_id):
-    if user_id == OWNER_ID and OWNER_ID != 0:
-        return True
-    if user_id == MANAGER_USER_ID and MANAGER_USER_ID != 0:
-        return True
-    return False
-
-# ════════════════════════════════════════════════════════════════════
-# ФУНКЦИИ БД
-# ════════════════════════════════════════════════════════════════════
-
-def load_db(filename, default=None):
-    """Загружает БД из файла"""
-    if default is None:
-        default = {}
-    if os.path.exists(filename):
-        try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Ошибка загрузки {filename}: {e}")
-            return default
-    return default
-
-def save_db(filename, data):
-    """Сохраняет БД в файл"""
-    try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения {filename}: {e}")
-
-def get_next_publication_id():
-    """Получает следующий ID публикации (id_0001, id_0002...)"""
-    db = load_db(PUBLICATIONS_DB, {'counter': 0, 'publications': {}})
-    
-    # Увеличиваем счётчик
-    db['counter'] = db.get('counter', 0) + 1
-    new_id = f"id_{db['counter']:04d}"
-    
-    # ОБЯЗАТЕЛЬНО сохраняем сразу
-    save_db(PUBLICATIONS_DB, db)
-    
-    logger.info(f"🆔 Новый ID: {new_id}")
-    return new_id
-
-
-
-def extract_car_details(text):
-    """
-    Извлекает структурированные данные из текста объявления.
-    Используется для обогащения publications.json и будущего API.
-    """
-    details = {
-        'car_brand': None,
-        'car_model': None,
-        'price': None,
-        'currency': None,
-        'year': None,
-        'mileage': None,
-        'city': None,
-    }
-
-    if not text:
-        return details
-
-    clean = EMOJI_PATTERN.sub('', text)
-
-    # Бренд
-    brands_map = {
-        'BMW': 'BMW', 'Mercedes': 'Mercedes-Benz', 'Audi': 'Audi',
-        'Toyota': 'Toyota', 'Lexus': 'Lexus', 'Honda': 'Honda',
-        'Nissan': 'Nissan', 'Mazda': 'Mazda', 'Kia': 'Kia',
-        'Hyundai': 'Hyundai', 'Volkswagen': 'Volkswagen',
-        'Porsche': 'Porsche', 'Volvo': 'Volvo', 'Geely': 'Geely',
-        'Haval': 'Haval', 'BYD': 'BYD', 'Tesla': 'Tesla',
-        'Ford': 'Ford', 'Chevrolet': 'Chevrolet', 'Rolls': 'Rolls-Royce',
-        'Bentley': 'Bentley', 'Ferrari': 'Ferrari', 'Land Rover': 'Land Rover',
-        'Range Rover': 'Range Rover', 'Genesis': 'Genesis',
-    }
-    for key, brand_name in brands_map.items():
-        if key.lower() in clean.lower():
-            details['car_brand'] = brand_name
-            break
-
-    # Цена и валюта
-    price_match = re.search(
-        r'(\d[\d\s., ]*\d)\s*([₽€$]|руб)',
-        clean
-    )
-    if price_match:
-        try:
-            price_str = re.sub(r'[\s,. ]', '', price_match.group(1))
-            details['price'] = int(price_str)
-            curr = price_match.group(2)
-            details['currency'] = '₽' if curr in ['₽', 'руб'] else curr
-        except:
-            pass
-
-    # Год выпуска
-    year_match = re.search(r'\b(20[0-2]\d)\b', clean)
-    if year_match:
-        details['year'] = int(year_match.group(1))
-
-    # Пробег
-    mileage_match = re.search(
-        r'(\d[\d\s.,]*\d)\s*(?:км|km|тыс\.\s*км)',
-        clean, re.IGNORECASE
-    )
-    if mileage_match:
-        try:
-            m_str = re.sub(r'[\s,.]', '', mileage_match.group(1))
-            details['mileage'] = int(m_str)
-        except:
-            pass
-
-    # Город (из строк с "в Москве", "до Москвы" и т.д.)
-    city_match = re.search(
-        r'(?:в|до|из)\s+(Москв[еа]|Санкт-Петербург[еа]|Краснодар[еа]|Сочи|'
-        r'Екатеринбург[еа]|Новосибирск[еа]|Казан[иь])',
-        clean, re.IGNORECASE
-    )
-    if city_match:
-        details['city'] = city_match.group(1)
-
-    return details
-
-def save_publication(pub_id, **kwargs):
-    """Сохраняет публикацию с обогащёнными данными для API/сайта."""
-    db = load_db(PUBLICATIONS_DB, {'counter': 0, 'publications': {}})
-
-    original = kwargs.get('original_caption', '')
-    details = extract_car_details(original)
-
-    # Название авто — используем extract_car_name_from_pub через текст напрямую
-    car_name_raw = None
-    if original:
-        for line in original.split('\n'):
-            clean = EMOJI_PATTERN.sub('', line).strip()
-            clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
-            if not clean or len(clean) < 3:
-                continue
-            found = False
-            for brand in _CAR_BRANDS_FOR_EXTRACT:
-                if brand.lower() in clean.lower():
-                    name = re.sub(r'\bв\s+продаже\b|\bв\s+наличии\b', '', clean, flags=re.IGNORECASE)
-                    name = re.sub(r'[\u203c!]+', '', name).strip()
-                    if len(name) > 3:
-                        car_name_raw = name[:80]
-                        found = True
-                        break
-            if found:
-                break
-
-    pub_msg_id = kwargs.get('published_message_id')
-    channel = TARGET_CHANNEL_NAME.replace('@', '')
-    telegram_link = f"https://t.me/{channel}/{pub_msg_id}" if pub_msg_id else None
-
-    now = datetime.now()
-    db['publications'][pub_id] = {
-        **kwargs,
-        'pub_id': pub_id,
-        'car_brand': details.get('car_brand'),
-        'car_model': car_name_raw,
-        'price': details.get('price'),
-        'currency': details.get('currency'),
-        'year': details.get('year'),
-        'mileage': details.get('mileage'),
-        'city': details.get('city'),
-        'telegram_link': telegram_link,
-        'status': 'active',
-        'published_at': now.isoformat(),
-        'expires_at': (now + timedelta(days=30)).isoformat(),
-    }
-    save_db(PUBLICATIONS_DB, db)
-    logger.info(f"\U0001f4be {pub_id} | {details.get('car_brand','?')} | {details.get('price','?')}{details.get('currency','')}")
-
-def find_publication(pub_id):
-    """Ищет публикацию по ID"""
-    db = load_db(PUBLICATIONS_DB, {'counter': 0, 'publications': {}})
-    return db['publications'].get(pub_id)
-
-def get_next_lead_id():
-    """Получает следующий ID заявки"""
-    db = load_db(LEADS_DB, {'counter': 0, 'leads': {}})
-    db['counter'] = db.get('counter', 0) + 1
-    new_id = f"lead_{db['counter']:05d}"
-    save_db(LEADS_DB, db)
-    return new_id
-
-def save_lead(lead_id, data):
-    """Сохраняет заявку"""
-    db = load_db(LEADS_DB, {'counter': 0, 'leads': {}})
-    db['leads'][lead_id] = {
-        **data,
-        'created_at': datetime.now().isoformat()
-    }
-    save_db(LEADS_DB, db)
-    # ════════════════════════════════════════════════════════════════════
-# УДАЛЕНИЕ ЭМОДЗИ
-# ════════════════════════════════════════════════════════════════════
-# EMOJI_PATTERN определён выше в блоке констант
-
-def remove_all_emojis(text):
-    """Удаляет ВСЕ эмодзи"""
-    return EMOJI_PATTERN.sub('', text)
-
-# ════════════════════════════════════════════════════════════════════
-# ОЧИСТКА ТЕКСТА ОТ КОНТАКТОВ И ФРАЗ
-# ════════════════════════════════════════════════════════════════════
-
-PHRASES_TO_REMOVE = [
-    # Контакты и ссылки на менеджеров
-    r'пишите\s+(?:нам|в\s+личку|нам\s+в\s+лс)',
-    r'звоните\s+(?:нам|по\s+номеру)?',
-    r'свяжитесь\s+(?:с\s+нами|в\s+личку)',
-    r'написать\s+(?:нам|в\s+личку)',
-    r'обращайтесь\s+(?:к\s+нам)?',
-    r'связаться\s+с\s+менеджером',
-    r'^.*наши\s+контакты[^\n]*$',
-    r'^.*менеджер\s+[А-ЯA-Z][а-яa-z]+[^\n]*$',
-    r'контакт(?:ы)?:?\s*\+?\d[\d\s\-()]*',
-    r'телефон:?\s*\+?\d[\d\s\-()]*',
-    r'^.*whatsapp[^\n]*$',
-    r'^.*viber[^\n]*$',
-    r'telegram:?\s*\+?\d[\d\s\-()]*',
-    # Торговые условия
+PHRASES_TO_DELETE = [
+    r'пишите\s+(?:нам|в\s+личку)',
+    r'звоните\s+(?:нам)?',
+    r'свяжитесь\s+(?:с\s+нами)?',
+    r'^.*наши\s+контакты.*$',
+    r'^.*менеджер\s+[А-ЯA-Z][а-яa-z]+.*$',
+    r'^.*whatsapp.*$',
+    r'^.*viber.*$',
     r'^.*[Рр]ассрочк[аеу].*$',
     r'^.*[Тт]rade.?[Іи]n.*$',
     r'^.*[Тт]рейд.?[Ии]н.*$',
     r'^.*[Оо]бмен\s+вашего\s+авто.*$',
-    r'^.*[Кк]редит[^\n]*$',
-    r'^.*[Лл]изинг[^\n]*$',
-    # Типовые фразы из каналов @grandway_import, @Autogroot, @hub_import
+    r'^.*[Кк]редит.*$',
+    r'^.*[Лл]изинг.*$',
     r'^.*[Пп]о\s+всем\s+вопросам.*$',
-    r'^.*[Пп]о\s+подбору\s+и\s+заказу.*$',
     r'^.*[Дд]оставка\s+по\s+регионам.*$',
     r'^.*[Аа]вто\s+готово\s+к\s+пригону.*$',
-    r'^.*готова?\s+к\s+пригону.*$',
-    r'^.*срок\s+доставки.*$',
     r'^.*[Рр]аботаем.*[Дд]оговор.*$',
     r'^.*[Тт]аможенная\s+пошлина.*$',
     r'^.*[Оо]тзывы\s+наших.*$',
     r'^.*CarVertical.*$',
     r'^.*[Рр]аботаем\s+официально.*$',
     r'^.*[Нн]ужна\s+цена\s+под\s+ключ.*$',
-    r'^.*[Цц]ена\s+указана\s+под\s+ключ.*$',
-    r'^.*включена\s+в\s+стоимость.*$',
-    r'^.*фиксируется\s+в\s+договоре.*$',
-    r'^.*дополнительн.*информаци.*$',
-    r'^.*[Бб]ез\s+ДТП[,.].*[Вв]ладелец.*$',
-    r'^.*[Нн]е\s+аукцион.*$',
-    r'^.*[Аа]укцион.*$',
+    r'^.*[Бб]ез\s+ДТП.*[Вв]ладелец.*$',
 ]
-
-def remove_old_contacts(text):
-    """ИСПРАВЛЕНО: Удаляет контакты и фразы 'Пишите нам'"""
-    
-    # Удаляем "В продаже", "В свободной продаже", "В ПРОДАЖЕ !!" и подобное
-    text = re.sub(r'^[^\n]*[Вв]\s+продаже[^\n]*\n', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'^[^\n]*[Вв]\s+свободной\s+продаже[^\n]*\n', '', text, flags=re.IGNORECASE)
-    
-    # Удаляем строки "АВТО ИЗ ЕВРОПЫ", "ГОТОВА К ПРИГОНУ" и т.п. (часто заглавными)
-    text = re.sub(r'^[^\n]*АВТО\s+ИЗ\s+[А-ЯЁ]+[^\n]*\n', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^[^\n]*готова?\s+к\s+пригону[^\n]*\n', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'^[^\n]*срок\s+доставки[^\n]*\n', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    
-    # Удаляем хэштеги
-    text = re.sub(r'#[A-Za-zА-Яа-яёЁ0-9_]+', '', text)
-    
-    # Удаляем фразы через PHRASES_TO_REMOVE
-    for phrase in PHRASES_TO_REMOVE:
-        text = re.sub(phrase, '', text, flags=re.IGNORECASE | re.MULTILINE)
-    
-    # Удаляем строки с именами менеджеров
-    text = re.sub(r'^.*[Мм]енеджер[^\n]*\n?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*[Аа]ртём[^\n]*\n?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*[Рр]оман[^\n]*\n?', '', text, flags=re.MULTILINE)
-    
-    # Удаляем статусные строки из каналов
-    text = re.sub(r'^.*[Аа]вто\s+прибыло[^\n]*\n?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*\bСБХ\b[^\n]*\n?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*[Аа]вто\s+в\s+наличии[^\n]*\n?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*[Вв]\s+продаже\s*[‼!]+[^\n]*\n?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*[Гг]отова?\s+к\s+отправке[^\n]*\n?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*[Дд]оступна?\s+к\s+заказу[^\n]*\n?', '', text, flags=re.MULTILINE)
-    
-    # Удаляем @каналы
-    text = re.sub(r'@[A-Za-z0-9_]+', '', text)
-    
-    # Удаляем ссылки Telegram
-    text = re.sub(r'https?://t\.me/[A-Za-z0-9_/?=]+', '', text)
-    
-    # Удаляем другие ссылки
-    text = re.sub(r'https?://[^\s]+', '', text)
-    
-    # Удаляем markdown ссылки
-    text = re.sub(r'\[[^\]]+\]\(https?://[^\)]+\)', '', text)
-    
-    # Удаляем секцию "Наши соц сети"
-    text = re.sub(r'Наши\s+соц\.?сети[\s\S]*?$', '', text, flags=re.IGNORECASE)
-    
-    # Удаляем "Доставка осуществляется" (заменим своим footer'ом)
-    text = re.sub(r'Доставка\s+осуществляется[^\n]*', '', text, flags=re.IGNORECASE)
-    
-    # Удаляем номера телефонов (отдельные строки)
-    text = re.sub(r'^\s*\+?\d[\d\s\-()]{5,}\s*$', '', text, flags=re.MULTILINE)
-    
-    return text
-
-def keep_only_moscow_price(text):
-    """Если есть цена в Москве - удаляем другие города"""
-    if not re.search(r'в москве', text, re.IGNORECASE):
-        return text
-    
-    logger.info("   📍 Москва найдена - удаляем другие города")
-    
-    text = re.sub(
-        r'^.*?(?:Итоговая цена|Цена)[^:\n]*в (?:Уссурийске|Владивостоке)[^:\n]*:[^\n]*\n?',
-        '',
-        text,
-        flags=re.IGNORECASE | re.MULTILINE
-    )
-    return text
-
-# ════════════════════════════════════════════════════════════════════
-# МАТЕМАТИКА ЦЕН
-# ════════════════════════════════════════════════════════════════════
-
-def calculate_markup(price, currency):
-    """Рассчитывает наценку по лестнице"""
-    if currency in ['₽', 'руб', 'RUB']:
-        if price >= 30_000_000:
-            return 1_000_000
-        elif price >= 25_000_000:
-            return 500_000
-        elif price >= 20_000_000:
-            return 350_000
-        elif price >= 15_000_000:
-            return 250_000
-        elif price >= 10_000_000:
-            return 180_000
-        elif price >= 7_000_000:
-            return 100_000
-        elif price >= 5_000_000:
-            return 80_000
-        else:
-            return 40_000
-    elif currency in ['€', '$']:
-        return 1_000
-    return 0
-
-def format_price_with_dots(price):
-    """Форматирует число с точками: 1235000 → 1.235.000"""
-    return f"{price:,}".replace(',', '.')
-
-def replace_price(match):
-    """Заменяет найденную цену на новую с наценкой"""
-    price_str = match.group(1)
-    currency = match.group(2)
-    
-    if currency in ['руб', 'RUB']:
-        currency = '₽'
-    
-    # Удаляем всё кроме цифр
-    price_clean = re.sub(r'[\s,.\u00a0]', '', price_str)
-    
-    try:
-        old_price = int(price_clean)
-        markup = calculate_markup(old_price, currency)
-        new_price = old_price + markup
-        return f"{format_price_with_dots(new_price)}{currency}"
-    except:
-        return match.group(0)
-
-def apply_price_markup(text):
-    """Применяет наценку ко всем ценам в тексте"""
-    patterns = [
-        r'(\d[\d\s.,\u00a0]*\d)\s*(₽|руб|RUB)',
-        r'(\d[\d\s.,\u00a0]*\d)\s*(€)',
-        r'(\d[\d\s.,\u00a0]*\d)\s*(\$)',
-    ]
-    
-    for pattern in patterns:
-        text = re.sub(pattern, replace_price, text)
-    
-    return text
-
-# ════════════════════════════════════════════════════════════════════
-# ФОРМАТИРОВАНИЕ ТЕКСТА
-# ════════════════════════════════════════════════════════════════════
-
-def is_section_header(line):
-    """Проверяет что это заголовок секции"""
-    headers = ['Комплектация:', 'Состояние:', 'Состояние автомобиля:', 'Опции:']
-    line_clean = line.lower().strip()
-    return any(h.lower() in line_clean for h in headers) and len(line) < 50
-
-def is_price_line(line):
-    """Проверяет что это строка с ценой"""
-    return bool(re.search(r'\d[\d\s.,\u00a0]*\d\s*[₽€$]', line))
-
-def format_characteristics(text):
-    """Форматирует характеристики: буллеты без дублей, без пустых строк"""
-    lines = text.split('\n')
-    result_lines = []
-    
-    for line in lines:
-        stripped = line.strip()
-        
-        if not stripped:
-            result_lines.append('')
-            continue
-        
-        # Строка только из двоеточия или пустой буллет — удаляем
-        if re.match(r'^[•\-–—\s:]+$', stripped):
-            continue
-        
-        # Убираем тире/минусы в начале строки (формат "- Год: 2022")
-        stripped = re.sub(r'^[-–—]\s*', '', stripped)
-        
-        if not stripped or re.match(r'^[•\s:]+$', stripped):
-            continue
-        
-        # Уже с буллетом
-        if stripped.startswith('•') or stripped.startswith('▪'):
-            clean = re.sub(r'^[•▪]\s*', '', stripped)
-            # Убираем тире если осталось после буллета
-            clean = re.sub(r'^[-–—]\s*', '', clean)
-            if clean and not re.match(r'^[\s:]+$', clean):
-                result_lines.append(f'• {clean}')
-            continue
-        
-        # Характеристика "поле: значение"
-        if ':' in stripped and not is_section_header(stripped) and not is_price_line(stripped):
-            field = stripped.split(':')[0].strip()
-            value = stripped.split(':', 1)[1].strip()
-            if len(field) < 40 and value.strip():
-                result_lines.append(f'• {stripped}')
-                continue
-        
-        result_lines.append(stripped)
-    
-    return '\n'.join(result_lines)
-
-def make_section_headers_bold(text):
-    """Делает заголовки секций жирными"""
-    headers = ['Комплектация:', 'Состояние:', 'Состояние автомобиля:', 'Опции:']
-    for header in headers:
-        text = re.sub(re.escape(header), f'<b>{header}</b>', text, flags=re.IGNORECASE)
-    return text
-
-def make_model_name_bold(text):
-    """Делает название модели (первая строка) жирным"""
-    lines = text.split('\n')
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if not stripped.startswith('•') and not stripped.startswith('<b>'):
-            lines[i] = f'<b>{stripped}</b>'
-            logger.info(f"   📝 Модель: {stripped[:50]}")
-            break
-    return '\n'.join(lines)
-
-def make_price_lines_bold(text):
-    """Делает строки с ценой жирными"""
-    pattern = r'^([^\n<]*\d[\d\s.,\u00a0]*\d\s*[₽€$][^\n<]*)$'
-    
-    def make_bold(match):
-        line = match.group(1).strip()
-        if not line.startswith('<b>'):
-            return f'<b>{line}</b>'
-        return line
-    
-    return re.sub(pattern, make_bold, text, flags=re.MULTILINE)
-
-def fix_spacing(text):
-    """Исправляет отступы, убирает пустые строки с одним двоеточием"""
-    # Убираем строки-мусор: только двоеточие, только тире, пустые буллеты
-    text = re.sub(r'^\s*[•\-–—]?\s*:\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*[•]\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*[-–—]\s*$', '', text, flags=re.MULTILINE)
-    
-    # Убираем 3+ пустых строк
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    
-    # Перед заголовками секций только одна пустая строка (без пустой строки)
-    section_headers = ['<b>Комплектация:</b>', '<b>Состояние:</b>', '<b>Состояние автомобиля:</b>', '<b>Комплектация и оснащение:</b>']
-    for header in section_headers:
-        escaped = re.escape(header)
-        text = re.sub(rf'\n\n+({escaped})', rf'\n\1', text)
-        text = re.sub(rf'({escaped})\n\n+', rf'\1\n', text)
-    
-    return text.strip()
-
-def determine_footer_type(text):
-    """Определяет тип footer'а"""
-    text_lower = text.lower()
-    
-    if 'в москве' in text_lower or 'во владивостоке' in text_lower:
-        return 'delivery'
-    if '€' in text or '$' in text:
-        return 'calculate'
-    
-    return 'delivery'
-
-def build_footer(footer_type, pub_id=None):
-    """
-    Footer без ID. ID вставляется в тело ПОСЛЕ жирной цены.
-    Структура:
-      «Написать менеджеру» 📞 ✅
-      (Ответ в течении часа)
-      🏎️ Заказать другое авто — жми сюда
-
-      @proauto_77
-    """
-    start_param = pub_id if pub_id else 'start'
-    manager_link = f'<a href="https://t.me/{BOT_USERNAME}?start={start_param}">«Написать менеджеру»</a> 📞 ✅'
-    channel_link = f'<a href="https://t.me/{TARGET_CHANNEL_NAME.replace("@", "")}">{TARGET_CHANNEL_NAME}</a>'
-    order_line = f'🏎️ Заказать другое авто — <a href="https://t.me/{BOT_USERNAME}">жми сюда</a>'
-
-    if footer_type == 'delivery':
-        footer = (
-            f"\n\nДоставка осуществляется во все города РФ\n\n"
-            f"По поводу покупки данного автомобиля или подбора:\n"
-            f"{manager_link}\n"
-            f"(Ответ в течении часа)\n"
-            f"{order_line}\n\n"
-            f"{channel_link}"
-        )
-    else:
-        footer = (
-            f"\n\nРассчитаем стоимость до Вашего дома 🏠 ✅\n"
-            f"{manager_link}\n"
-            f"(Ответ в течении часа)\n"
-            f"{order_line}\n\n"
-            f"{channel_link}"
-        )
-
-    return footer
-
-
-
-def generate_hashtags(text):
-    """Генерирует 3-5 релевантных хэштегов на основе текста объявления"""
-    tags = set()
-    
-    text_lower = text.lower()
-    
-    # Марки авто → хэштег
-    brand_tags = {
-        'bmw': '#BMW', 'mercedes': '#Mercedes', 'audi': '#Audi',
-        'toyota': '#Toyota', 'lexus': '#Lexus', 'honda': '#Honda',
-        'nissan': '#Nissan', 'mazda': '#Mazda', 'subaru': '#Subaru',
-        'kia': '#Kia', 'hyundai': '#Hyundai', 'genesis': '#Genesis',
-        'volkswagen': '#Volkswagen', 'porsche': '#Porsche', 'volvo': '#Volvo',
-        'geely': '#Geely', 'haval': '#Haval', 'byd': '#BYD', 'chery': '#Chery',
-        'lixiang': '#Lixiang', 'nio': '#NIO', 'zeekr': '#Zeekr',
-        'tesla': '#Tesla', 'rolls': '#RollsRoyce', 'bentley': '#Bentley',
-        'ferrari': '#Ferrari', 'lamborghini': '#Lamborghini',
-        'land rover': '#LandRover', 'range rover': '#RangeRover',
-        'ford': '#Ford', 'chevrolet': '#Chevrolet',
-        'mitsubishi': '#Mitsubishi', 'infiniti': '#Infiniti',
-        'rav4': '#RAV4', 'camry': '#Camry', 'corolla': '#Corolla',
-        'x5': '#BMWX5', 'x7': '#BMWX7', 'x6': '#BMWX6',
-        'cayenne': '#PorscheCayenne',
-    }
-    
-    for keyword, tag in brand_tags.items():
-        if keyword in text_lower:
-            tags.add(tag)
-            if len(tags) >= 3:
-                break
-    
-    # Всегда добавляем базовые теги ProAuto
-    base_tags = ['#авточастно', '#автоподзаказ', '#ProAuto77']
-    
-    result_tags = list(tags)[:2] + base_tags[:3]
-    return ' '.join(result_tags[:5])
-
-def insert_id_after_price(text, pub_id, publication_link):
-    """Вставляет ID сразу после последней жирной строки с ценой"""
-    if not pub_id:
-        return text
-    if publication_link:
-        id_tag = f'<a href="{publication_link}">{pub_id}</a>'
-    else:
-        id_tag = pub_id
-    lines = text.split('\n')
-    result = []
-    last_price_idx = -1
-    for i, line in enumerate(lines):
-        if re.search(r'<b>[^<]*\d[^<]*[₽€$][^<]*</b>', line):
-            last_price_idx = i
-    if last_price_idx >= 0:
-        for i, line in enumerate(lines):
-            result.append(line)
-            if i == last_price_idx:
-                result.append(id_tag)
-    else:
-        result = lines + [id_tag]
-    return '\n'.join(result)
-
-
-def format_announcement(original_text, pub_id, publication_link):
-    """ГЛАВНАЯ функция форматирования"""
-    if not original_text:
-        return None
-    logger.info(f"🔧 {pub_id}")
-    text = original_text
-    text = remove_all_emojis(text)
-    text = remove_old_contacts(text)
-    text = apply_price_markup(text)
-    text = keep_only_moscow_price(text)
-    footer_type = determine_footer_type(text)
-    text = format_characteristics(text)
-    text = make_section_headers_bold(text)
-    text = make_model_name_bold(text)
-    text = make_price_lines_bold(text)
-    text = fix_spacing(text)
-    # ID вставляем ПОСЛЕ жирной цены
-    text = insert_id_after_price(text, pub_id, publication_link)
-    header = "Прямая продажа ✅\n\n"
-    footer = build_footer(footer_type, pub_id)
-    # Хэштеги на основе текста объявления
-    hashtags = generate_hashtags(text)
-    logger.info(f"✅ Готово")
-    return header + text + footer + (f"\n\n{hashtags}" if hashtags else "")
-    # ════════════════════════════════════════════════════════════════════
-# ВАЛИДАЦИЯ ОБЪЯВЛЕНИЙ
-# ════════════════════════════════════════════════════════════════════
-
-def is_valid_announcement(text, has_photo):
-    """Проверяет валидность объявления"""
-    if not has_photo:
-        return False, "нет фото"
-    
-    if not text or len(text) < 20:
-        return False, "короткий текст"
-    
-    # Проверяем наличие цены или ключевых слов
-    has_price = bool(re.search(r'\d[\d\s.,\u00a0]*\d\s*[₽€$]|\d[\d\s.,\u00a0]*\d\s*руб', text))
-    
-    has_keywords = bool(re.search(
-        r'BMW|Mercedes|Audi|Toyota|Geely|Kia|Mazda|Volkswagen|Porsche|Rolls-Royce|Honda|Hyundai|'
-        r'Volvo|Ford|Nissan|Lamborghini|Ferrari|Bentley|Lexus|Infiniti|Tesla|Chery|Haval|BYD|'
-        r'авто|машин|двигател|автомобиль',
-        text, re.IGNORECASE
-    ))
-    
-    if has_price or has_keywords:
-        return True, "OK"
-    
-    return False, "не авто"
-
-def extract_pub_id_from_text(text):
-    """Извлекает ID публикации из текста (id_0001)"""
-    if not text:
-        return None
-    match = re.search(r'id_(\d{4})', text)
-    if match:
-        return f"id_{match.group(1)}"
-    return None
-
-# ════════════════════════════════════════════════════════════════════
-# ИНФОРМАЦИЯ ОБ ИСТОЧНИКЕ
-# ════════════════════════════════════════════════════════════════════
-
-def extract_forward_source(message):
-    """Извлекает информацию об источнике переслания"""
-    info = {
-        'is_forwarded': False,
-        'source_chat_id': None,
-        'source_message_id': None,
-        'source_chat_username': None,
-        'source_chat_title': None,
-    }
-    
-    if not message.forward_from_chat:
-        return info
-    
-    info['is_forwarded'] = True
-    info['source_chat_id'] = message.forward_from_chat.id
-    info['source_message_id'] = message.forward_from_message_id
-    info['source_chat_username'] = message.forward_from_chat.username
-    info['source_chat_title'] = message.forward_from_chat.title
-    
-    return info
-
-def generate_original_link(source_info):
-    """Генерирует ссылку на оригинальное объявление"""
-    if not source_info.get('is_forwarded'):
-        return None
-    
-    msg_id = source_info['source_message_id']
-    username = source_info['source_chat_username']
-    chat_id = source_info['source_chat_id']
-    
-    # Если есть username - используем его
-    if username:
-        return f"https://t.me/{username}/{msg_id}"
-    
-    # Если приватный чат - используем ID
-    if str(chat_id).startswith('-100'):
-        chat_id_clean = str(chat_id)[4:]
-    else:
-        chat_id_clean = str(abs(chat_id))
-    
-    return f"https://t.me/c/{chat_id_clean}/{msg_id}"
-
-def generate_publication_link(message_id):
-    """Генерирует ссылку на нашу публикацию в @proauto_77"""
-    channel = TARGET_CHANNEL_NAME.replace('@', '')
-    return f"https://t.me/{channel}/{message_id}"
-
-# ════════════════════════════════════════════════════════════════════
-# ОБРАБОТКА АЛЬБОМОВ (несколько фото)
-# ════════════════════════════════════════════════════════════════════
-
-async def process_media_group(media_group_id, context):
-    """Обрабатывает альбом из нескольких фото"""
-    await asyncio.sleep(3)
-    
-    if media_group_id not in media_groups_cache:
-        return
-    
-    group_data = media_groups_cache[media_group_id]
-    photos = group_data['photos']
-    caption = group_data['caption']
-    source_info = group_data['source_info']
-    
-    logger.info(f"📸 Альбом: {len(photos)} фото")
-    
-    if not photos:
-        del media_groups_cache[media_group_id]
-        return
-    
-    # Валидируем
-    valid, reason = is_valid_announcement(caption, True)
-    if not valid:
-        logger.info(f"⏭️ {reason}")
-        del media_groups_cache[media_group_id]
-        return
-    
-    # Генерируем ID
-    pub_id = get_next_publication_id()
-    source_link = generate_original_link(source_info) if source_info else None
-    
-    # Форматируем текст БЕЗ ссылки (узнаём ID поста позже)
-    formatted_text = format_announcement(caption, pub_id, None)
-    if not formatted_text:
-        del media_groups_cache[media_group_id]
-        return
-    
-    try:
-        # Собираем альбом
-        media = []
-        for i, photo_id in enumerate(photos):
-            if i == 0:
-                media.append(InputMediaPhoto(media=photo_id, caption=formatted_text, parse_mode='HTML'))
-            else:
-                media.append(InputMediaPhoto(media=photo_id))
-        
-        # Публикуем в группу
-        sent_messages = await context.bot.send_media_group(
-            chat_id=TARGET_GROUP_ID,
-            media=media
-        )
-        
-        published_message_id = sent_messages[0].message_id if sent_messages else None
-        publication_link = generate_publication_link(published_message_id) if published_message_id else None
-        
-        logger.info(f"✅ Альбом опубликован, msg_id: {published_message_id}")
-        
-        # Обновляем caption с правильной ссылкой ID
-        if publication_link and sent_messages:
-            new_caption = format_announcement(caption, pub_id, publication_link)
-            try:
-                await context.bot.edit_message_caption(
-                    chat_id=TARGET_GROUP_ID,
-                    message_id=sent_messages[0].message_id,
-                    caption=new_caption,
-                    parse_mode='HTML'
-                )
-                logger.info(f"✅ Caption обновлён с ссылкой")
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось обновить caption: {e}")
-        
-        # Сохраняем в БД
-        save_publication(
-            pub_id,
-            source_link=source_link,
-            source_chat_id=source_info['source_chat_id'] if source_info else None,
-            source_message_id=source_info['source_message_id'] if source_info else None,
-            source_username=source_info['source_chat_username'] if source_info else None,
-            published_message_id=published_message_id,
-            published_chat_id=TARGET_GROUP_ID,
-            original_caption=caption
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка альбома: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-    
-    finally:
-        if media_group_id in media_groups_cache:
-            del media_groups_cache[media_group_id]
-
-# ════════════════════════════════════════════════════════════════════
-# ОБРАБОТКА ОДИНОЧНЫХ ОБЪЯВЛЕНИЙ
-# ════════════════════════════════════════════════════════════════════
-
-async def handle_announcement(update, context, source_info):
-    """Обрабатывает объявление (с альбомами или одиночное)"""
-    message = update.message
-    media_group_id = message.media_group_id
-    text = message.text or message.caption or ""
-    has_photo = bool(message.photo)
-    
-    # ───────────────────────────────────────────
-    # АЛЬБОМ - собираем и обрабатываем через 3 сек
-    if media_group_id:
-        if media_group_id not in media_groups_cache:
-            media_groups_cache[media_group_id] = {
-                'photos': [],
-                'caption': '',
-                'source_info': source_info
-            }
-            asyncio.create_task(process_media_group(media_group_id, context))
-        
-        if message.photo:
-            photo_id = message.photo[-1].file_id
-            media_groups_cache[media_group_id]['photos'].append(photo_id)
-        
-        if message.caption and not media_groups_cache[media_group_id]['caption']:
-            media_groups_cache[media_group_id]['caption'] = message.caption
-        
-        return
-    
-    # ───────────────────────────────────────────
-    # ОДИНОЧНОЕ СООБЩЕНИЕ
-    valid, reason = is_valid_announcement(text, has_photo)
-    if not valid:
-        logger.info(f"⏭️ {reason}")
-        return
-    
-    pub_id = get_next_publication_id()
-    source_link = generate_original_link(source_info) if source_info else None
-    
-    formatted = format_announcement(text, pub_id, None)
-    if not formatted:
-        return
-    
-    try:
-        # Отправляем фото или текст
-        if message.photo:
-            photo = message.photo[-1]
-            sent = await context.bot.send_photo(
-                chat_id=TARGET_GROUP_ID,
-                photo=photo.file_id,
-                caption=formatted,
-                parse_mode='HTML'
-            )
-        else:
-            sent = await context.bot.send_message(
-                chat_id=TARGET_GROUP_ID,
-                text=formatted,
-                parse_mode='HTML'
-            )
-        
-        published_message_id = sent.message_id
-        publication_link = generate_publication_link(published_message_id)
-        
-        # Обновляем с правильной ссылкой ID
-        new_text = format_announcement(text, pub_id, publication_link)
-        try:
-            if message.photo:
-                await context.bot.edit_message_caption(
-                    chat_id=TARGET_GROUP_ID,
-                    message_id=published_message_id,
-                    caption=new_text,
-                    parse_mode='HTML'
-                )
-            else:
-                await context.bot.edit_message_text(
-                    chat_id=TARGET_GROUP_ID,
-                    message_id=published_message_id,
-                    text=new_text,
-                    parse_mode='HTML'
-                )
-        except:
-            pass
-        
-        # Сохраняем в БД
-        save_publication(
-            pub_id,
-            source_link=source_link,
-            source_chat_id=source_info['source_chat_id'] if source_info else None,
-            source_message_id=source_info['source_message_id'] if source_info else None,
-            source_username=source_info['source_chat_username'] if source_info else None,
-            published_message_id=published_message_id,
-            published_chat_id=TARGET_GROUP_ID,
-            original_caption=text
-        )
-        
-        logger.info(f"✅ {pub_id} опубликовано")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-
-# ════════════════════════════════════════════════════════════════════
-# УВЕДОМЛЕНИЕ МЕНЕДЖЕРУ
-# ════════════════════════════════════════════════════════════════════
-
-async def notify_manager(context, lead_id, lead_data):
-    """Отправляет заявку менеджеру в ЛС"""
-    if not MANAGER_USER_ID and not OWNER_ID:
-        return
-    
-    text = f"🆕 <b>ЗАЯВКА {lead_id}</b>\n\n"
-    
-    # Клиент
-    if lead_data.get('username'):
-        text += f"👤 @{lead_data['username']} "
-    text += f"({lead_data.get('first_name', '')} {lead_data.get('last_name', '')})\n"
-    text += f"🆔 User ID: <code>{lead_data['user_id']}</code>\n\n"
-    
-    # Авто (если конкретное)
-    if lead_data.get('pub_id'):
-        text += f"🚗 <b>Интересует:</b> {lead_data.get('car_name', '')}\n"
-        text += f"({lead_data['pub_id']})\n\n"
-    
-    # Детали заявки
-    text += f"📋 <b>Параметры:</b>\n"
-    if lead_data.get('brand'):
-        text += f"• Марка: {lead_data['brand']}\n"
-    if lead_data.get('model'):
-        text += f"• Модель: {lead_data['model']}\n"
-    if lead_data.get('generation'):
-        text += f"• Поколение: {lead_data['generation']}\n"
-    if lead_data.get('city'):
-        text += f"• Город: {lead_data['city']}\n"
-    if lead_data.get('timing'):
-        text += f"• Срок: {lead_data['timing']}\n"
-    
-    # Контакт
-    # Кликабельная ссылка на клиента
-    username = lead_data.get('username')
-    first_name = lead_data.get('first_name', 'Клиент')
-    uid = lead_data['user_id']
-
-    if username:
-        # username → ссылка которая работает везде
-        text += f"\n💬 <a href='https://t.me/{username}'>Написать клиенту @{username}</a>"
-    else:
-        # Нет username — используем text_mention (работает в TG через entities)
-        # Формат: упоминание через HTML без username
-        text += f"\n💬 Написать клиенту: "
-        text += f"<a href='tg://user?id={uid}'>{first_name} (нажми)</a>"
-        text += f"\n   ID для поиска: <code>{uid}</code>"
-    
-    # Отправляем владельцу и менеджеру
-    for recipient_id in [OWNER_ID, MANAGER_USER_ID]:
-        if recipient_id != 0:
-            try:
-                await context.bot.send_message(
-                    chat_id=recipient_id,
-                    text=text,
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"⚠️ Не удалось уведомить {recipient_id}: {e}")
-
-# ════════════════════════════════════════════════════════════════════
-# DEEP LINKING И СТАРТ БРИФА
-# ════════════════════════════════════════════════════════════════════
 
 CITIES = [
     '🏙 Москва', '🏙 Санкт-Петербург', '🌊 Краснодар', '🌊 Сочи',
     '🏔 Екатеринбург', '🌲 Новосибирск', '🕌 Казань', '☀️ Ростов-на-Дону',
-    '🏛 Нижний Новгород', '⚓ Владивосток', '🌿 Воронеж', '🏙 Тюмень',
-    '🏙 Уфа', '🏙 Красноярск', '🏙 Челябинск'
+    '🏛 Нижний Новгород', '⚓ Владивосток', '🏙 Тюмень', '🏙 Уфа',
+    '🏙 Красноярск', '🏙 Челябинск', '🌿 Воронеж',
 ]
-
 TIMINGS = [
-    '⚡ В этом месяце',
-    '📅 1-2 месяца',
-    '🗓 3-6 месяцев',
-    '👀 Просто изучаю'
+    '⚡ В этом месяце', '📅 1-2 месяца',
+    '🗓 3-6 месяцев', '👀 Просто изучаю',
 ]
-
 BRAND_GROUPS = {
-    '🇩🇪 Немецкие': ['BMW', 'Mercedes-Benz', 'Audi', 'Volkswagen', 'Porsche', 'Volvo'],
-    '🇯🇵 Японские': ['Toyota', 'Lexus', 'Honda', 'Nissan', 'Mazda', 'Subaru', 'Mitsubishi', 'Infiniti'],
-    '🇰🇷 Корейские': ['Kia', 'Hyundai', 'Genesis'],
-    '🇨🇳 Китайские': ['Geely', 'Haval', 'BYD', 'Chery', 'Lixiang', 'NIO', 'Zeekr'],
-    '🇺🇸 Американские': ['Tesla', 'Ford', 'Chevrolet', 'Cadillac', 'Jeep'],
-    '🇬🇧 Британские': ['Land Rover', 'Bentley', 'Rolls-Royce', 'Jaguar', 'Aston Martin', 'McLaren'],
-    '👑 Итальянские': ['Ferrari', 'Lamborghini', 'Maserati', 'Alfa Romeo'],
+    '🇩🇪 Немецкие':    ['BMW','Mercedes-Benz','Audi','Volkswagen','Porsche','Volvo'],
+    '🇯🇵 Японские':    ['Toyota','Lexus','Honda','Nissan','Mazda','Subaru','Mitsubishi','Infiniti'],
+    '🇰🇷 Корейские':   ['Kia','Hyundai','Genesis'],
+    '🇨🇳 Китайские':   ['Geely','Haval','BYD','Chery','Lixiang','NIO','Zeekr'],
+    '🇺🇸 Американские':['Tesla','Ford','Chevrolet','Cadillac','Jeep'],
+    '🇬🇧 Британские':  ['Land Rover','Bentley','Rolls-Royce','Jaguar'],
+    '👑 Итальянские':   ['Ferrari','Lamborghini','Maserati','Alfa Romeo'],
+}
+CAR_DATABASE = {
+    'BMW': {'1 серии':'2004-2026','2 серии':'2014-2026','3 серии':'1975-2026',
+            '4 серии':'2013-2026','5 серии':'1972-2026','6 серии':'1976-2024',
+            '7 серии':'1977-2026','8 серии':'1989-2026','X1':'2009-2026',
+            'X2':'2017-2026','X3':'2003-2026','X4':'2014-2026','X5':'1999-2026',
+            'X6':'2007-2026','X7':'2019-2026','M3':'1986-2026','M4':'2014-2026',
+            'M5':'1985-2026','i4':'2021-2026','i7':'2022-2026','iX':'2021-2026'},
+    'Mercedes-Benz': {'A-Class':'2013-2026','C-Class':'2000-2026','E-Class':'2002-2026',
+                      'S-Class':'2006-2026','G-Class':'2000-2026','GLC':'2015-2026',
+                      'GLE':'2015-2026','GLS':'2013-2026','EQS':'2021-2026'},
+    'Audi': {'A3':'2003-2026','A4':'2001-2026','A5':'2007-2026','A6':'1998-2026',
+             'A8':'1999-2026','Q3':'2011-2026','Q5':'2008-2026','Q7':'2006-2026',
+             'Q8':'2018-2026','RS6':'2002-2026','TT':'1999-2023'},
+    'Toyota': {'Camry':'1982-2026','Corolla':'1966-2026','RAV4':'1994-2026',
+               'Land Cruiser':'1951-2026','Highlander':'2001-2026','Supra':'1978-2026'},
+    'Lexus': {'ES':'1989-2026','GX':'2003-2026','IS':'1999-2026','LS':'1989-2026',
+              'LX':'1996-2026','NX':'2014-2026','RX':'1997-2026'},
+    'Honda': {'Accord':'1976-2026','Civic':'1972-2026','CR-V':'1995-2026',
+              'Pilot':'2002-2026'},
+    'Nissan': {'Altima':'1992-2026','GT-R':'2007-2026','Murano':'2003-2026',
+               'Patrol':'1980-2026','Qashqai':'2006-2026','X-Trail':'2001-2026'},
+    'Mazda': {'CX-5':'2012-2026','CX-9':'2007-2026','Mazda3':'2003-2026',
+              'Mazda6':'2002-2026','MX-5':'1989-2026'},
+    'Kia': {'Carnival':'1998-2026','EV6':'2021-2026','K5':'2010-2026',
+            'Sorento':'2002-2026','Sportage':'1993-2026','Telluride':'2020-2026'},
+    'Hyundai': {'Elantra':'1990-2026','IONIQ 5':'2021-2026','Palisade':'2019-2026',
+                'Santa Fe':'2001-2026','Tucson':'2004-2026'},
+    'Genesis': {'G80':'2017-2026','GV80':'2021-2026','GV70':'2021-2026'},
+    'Volkswagen': {'Golf':'1974-2026','Jetta':'1979-2026','Passat':'1973-2026',
+                   'T-Cross':'2019-2026','Tiguan':'2007-2026','Touareg':'2002-2026'},
+    'Porsche': {'911':'1964-2026','Cayenne':'2002-2026','Macan':'2014-2026',
+                'Panamera':'2009-2026','Taycan':'2020-2026'},
+    'Land Rover': {'Defender':'1983-2026','Discovery':'1989-2026',
+                   'Range Rover':'1970-2026','Range Rover Sport':'2005-2026'},
+    'Volvo': {'S60':'2000-2026','S90':'2016-2026','XC40':'2017-2026',
+              'XC60':'2008-2026','XC90':'2003-2026'},
+    'Tesla': {'Model 3':'2017-2026','Model S':'2012-2026',
+              'Model X':'2015-2026','Model Y':'2020-2026'},
+    'BYD': {'Han':'2020-2026','Seal':'2022-2026','Tang':'2018-2026'},
+    'Geely': {'Coolray':'2019-2026','Monjaro':'2022-2026','Tugella':'2020-2026'},
+    'Haval': {'H6':'2011-2026','H9':'2015-2026','Jolion':'2021-2026'},
+    'Chery': {'Tiggo 7 Pro':'2020-2026','Tiggo 8':'2018-2026','Omoda 5':'2022-2026'},
+    'Rolls-Royce': {'Ghost':'2010-2026','Cullinan':'2019-2026','Phantom':'2003-2026'},
+    'Bentley': {'Bentayga':'2016-2026','Continental GT':'2003-2026','Flying Spur':'2005-2026'},
+    'Ferrari': {'Roma':'2020-2026','Purosangue':'2023-2026','SF90':'2020-2026'},
+    'Lamborghini': {'Urus':'2018-2026','Huracán':'2014-2026'},
+    'Lixiang': {'L7':'2023-2026','L8':'2022-2026','L9':'2022-2026'},
+    'NIO': {'ES6':'2018-2026','ET5':'2022-2026','ET7':'2022-2026'},
+    'Zeekr': {'001':'2021-2026','007':'2023-2026','X':'2023-2026'},
 }
 
-# Состояния опросника
-SPECIFIC_ASK_CITY = 'specific_ask_city'
-SPECIFIC_ASK_TIMING = 'specific_ask_timing'
-SPECIFIC_FINALIZE = 'specific_finalize'
+def get_models(brand):
+    return sorted(list(CAR_DATABASE.get(brand, {}).keys()))
 
-CUSTOM_ASK_BRAND_GROUP = 'custom_ask_brand_group'
-CUSTOM_ASK_BRAND = 'custom_ask_brand'
-CUSTOM_ASK_MODEL = 'custom_ask_model'
-CUSTOM_ASK_GENERATION = 'custom_ask_generation'
-CUSTOM_ASK_TIMING = 'custom_ask_timing'
-CUSTOM_ASK_CITY = 'custom_ask_city'
-CUSTOM_FINALIZE = 'custom_finalize'
+def get_generations(brand, model):
+    v = CAR_DATABASE.get(brand, {}).get(model)
+    return [v] if v else []
 
-def get_user_state(user_id):
-    """Получает состояние пользователя"""
-    if user_id not in BRIEF_STATES:
-        BRIEF_STATES[user_id] = {'step': None, 'data': {}}
-    return BRIEF_STATES[user_id]
+# ════════════════════════════════════════════════
+# ПРАВА
+# ════════════════════════════════════════════════
+def has_rights(uid):
+    return (uid == OWNER_ID and OWNER_ID != 0) or \
+           (uid == MANAGER_USER_ID and MANAGER_USER_ID != 0)
 
-def clear_user_state(user_id):
-    """Очищает состояние пользователя"""
-    if user_id in BRIEF_STATES:
-        del BRIEF_STATES[user_id]
-        # ════════════════════════════════════════════════════════════════════
-# ФУНКЦИИ БРИФА: КОНКРЕТНОЕ АВТО (SPECIFIC_CAR ПУТЬ)
-# ════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════
+# БД
+# ════════════════════════════════════════════════
+def load_db(f, default=None):
+    if default is None:
+        default = {}
+    if os.path.exists(f):
+        try:
+            with open(f, 'r', encoding='utf-8') as fp:
+                return json.load(fp)
+        except:
+            return default
+    return default
 
-async def specific_ask_city(update, context, user_id):
-    """Шаг 1: Город доставки (для конкретного авто)"""
-    state = get_user_state(user_id)
-    state['step'] = SPECIFIC_ASK_CITY
-    
-    keyboard = []
-    row = []
-    for i, city in enumerate(CITIES):
-        row.append(InlineKeyboardButton(city, callback_data=f"specific_city_{i}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("✍️ Другой город", callback_data="specific_city_other")])
-    
-    text = "🏙 <b>В какой город нужна доставка?</b>"
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+def save_db(f, data):
+    try:
+        with open(f, 'w', encoding='utf-8') as fp:
+            json.dump(data, fp, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"save_db error: {e}")
 
-async def specific_ask_timing(update, context, user_id):
-    """Шаг 2: Сроки покупки (для конкретного авто)"""
-    state = get_user_state(user_id)
-    state['step'] = SPECIFIC_ASK_TIMING
-    
-    keyboard = [[InlineKeyboardButton(t, callback_data=f"specific_timing_{i}")] 
-                for i, t in enumerate(TIMINGS)]
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="⏰ <b>Когда планируете покупку?</b>",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+def next_pub_id():
+    db = load_db(PUBLICATIONS_DB, {'counter':0,'publications':{}})
+    db['counter'] = db.get('counter',0) + 1
+    nid = f"id_{db['counter']:04d}"
+    save_db(PUBLICATIONS_DB, db)
+    return nid
 
-async def specific_finalize(update, context, user_id):
-    """Завершение: Сохранение заявки (для конкретного авто)"""
-    state = get_user_state(user_id)
-    data = state['data']
-    user = update.effective_user
-    
-    lead_id = get_next_lead_id()
-    
-    lead_data = {
-        'user_id': user_id,
-        'username': user.username,
-        'first_name': user.first_name,
-        'last_name': user.last_name,
-        'pub_id': data.get('pub_id'),
-        'car_name': data.get('car_name'),
-        'city': data.get('city'),
-        'timing': data.get('timing'),
-        'interest_type': 'specific_car'
+def save_pub(pub_id, **kw):
+    db = load_db(PUBLICATIONS_DB, {'counter':0,'publications':{}})
+    now = datetime.now()
+    db['publications'][pub_id] = {
+        **kw, 'pub_id': pub_id,
+        'published_at': now.isoformat(),
+        'expires_at': (now + timedelta(days=30)).isoformat(),
+        'status': 'active',
     }
-    
-    save_lead(lead_id, lead_data)
-    
-    # Сообщение клиенту
-    client_text = (
-        f"✅ <b>Спасибо! Ваша заявка #{lead_id} принята</b>\n\n"
-        f"🚗 <b>Интересует:</b> {data.get('car_name', 'автомобиль')}\n"
-        f"📍 <b>Доставка в:</b> {data.get('city', '?')}\n"
-        f"⏰ <b>Срок:</b> {data.get('timing', '?')}\n\n"
-        f"📞 Менеджер свяжется с Вами в течение <b>1 часа</b>\n\n"
-        f"Благодарим за доверие к ProAuto ✅\n\n"
-        f"Наш канал с актуальными предложениями:\n"
-        f"{TARGET_CHANNEL_NAME}"
-    )
-    
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=client_text,
-        parse_mode='HTML'
-    )
-    
-    # Уведомление менеджеру
-    await notify_manager(context, lead_id, lead_data)
-    
-    clear_user_state(user_id)
+    save_db(PUBLICATIONS_DB, db)
 
-# ════════════════════════════════════════════════════════════════════
-# ФУНКЦИИ БРИФА: ИНДИВИДУАЛЬНЫЙ ЗАКАЗ (CUSTOM ПУТЬ)
-# ════════════════════════════════════════════════════════════════════
+def find_pub(pub_id):
+    return load_db(PUBLICATIONS_DB, {'counter':0,'publications':{}})['publications'].get(pub_id)
 
-async def custom_ask_brand_group(update, context, user_id):
-    """Шаг 1: Группа марок"""
-    state = get_user_state(user_id)
-    state['step'] = CUSTOM_ASK_BRAND_GROUP
-    
-    keyboard = [[InlineKeyboardButton(g, callback_data=f"custom_bgroup_{i}")] 
-                for i, g in enumerate(BRAND_GROUPS.keys())]
-    keyboard.append([InlineKeyboardButton("🤔 Любая марка", callback_data="custom_bgroup_any")])
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="🚗 <b>Какие марки Вас интересуют?</b>",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+def next_lead_id():
+    db = load_db(LEADS_DB, {'counter':0,'leads':{}})
+    db['counter'] = db.get('counter',0) + 1
+    nid = f"lead_{db['counter']:05d}"
+    save_db(LEADS_DB, db)
+    return nid
 
-async def custom_ask_brand(update, context, user_id, group_idx):
-    """Шаг 2: Конкретная марка"""
-    state = get_user_state(user_id)
-    state['step'] = CUSTOM_ASK_BRAND
-    state['data']['brand_group_idx'] = group_idx
-    
-    group_name = list(BRAND_GROUPS.keys())[group_idx]
-    brands = BRAND_GROUPS[group_name]
-    
-    keyboard = []
-    row = []
-    for i, brand in enumerate(brands):
-        row.append(InlineKeyboardButton(brand, callback_data=f"custom_brand_{group_idx}_{i}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="custom_back_to_groups")])
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"<b>{group_name}</b>\n\nВыберите марку:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+def save_lead(lid, data):
+    db = load_db(LEADS_DB, {'counter':0,'leads':{}})
+    db['leads'][lid] = {**data, 'created_at': datetime.now().isoformat()}
+    save_db(LEADS_DB, db)
 
-async def custom_ask_model(update, context, user_id):
-    """Шаг 3: Модель"""
-    state = get_user_state(user_id)
-    state['step'] = CUSTOM_ASK_MODEL
-    
-    brand = state['data'].get('brand')
-    if not brand or brand == 'Любая':
-        state['data']['model'] = 'Любая'
-        await custom_ask_generation(update, context, user_id)
-        return
-    
-    models = get_models(brand)
-    
-    if not models:
-        logger.warning(f"⚠️ Нет моделей для {brand}")
-        state['data']['model'] = 'Не указана'
-        await custom_ask_generation(update, context, user_id)
-        return
-    
-    keyboard = []
-    row = []
-    for i, model in enumerate(models):
-        row.append(InlineKeyboardButton(model, callback_data=f"custom_model_{i}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="custom_back_to_brands")])
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"<b>{brand}</b>\n\nВыберите модель:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+def get_state(uid):
+    if uid not in BRIEF_STATES:
+        BRIEF_STATES[uid] = {'step': None, 'data': {}}
+    return BRIEF_STATES[uid]
 
-async def custom_ask_generation(update, context, user_id):
-    """Шаг 4: Поколение"""
-    state = get_user_state(user_id)
-    state['step'] = CUSTOM_ASK_GENERATION
-    
-    brand = state['data'].get('brand')
-    model = state['data'].get('model')
-    
-    if not brand or not model or brand == 'Любая' or model == 'Любая':
-        state['data']['generation'] = 'Любое'
-        await custom_ask_timing(update, context, user_id)
-        return
-    
-    generations = get_generations(brand, model)
-    
-    if not generations:
-        logger.warning(f"⚠️ Нет поколений для {brand} {model}")
-        state['data']['generation'] = 'Не указано'
-        await custom_ask_timing(update, context, user_id)
-        return
-    
-    keyboard = []
-    for i, gen in enumerate(generations):
-        keyboard.append([InlineKeyboardButton(gen, callback_data=f"custom_gen_{i}")])
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="custom_back_to_models")])
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"<b>{brand} {model}</b>\n\nВыберите поколение:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+def clear_state(uid):
+    BRIEF_STATES.pop(uid, None)
 
-async def custom_ask_timing(update, context, user_id):
-    """Шаг 5: Сроки покупки"""
-    state = get_user_state(user_id)
-    state['step'] = CUSTOM_ASK_TIMING
-    
-    keyboard = [[InlineKeyboardButton(t, callback_data=f"custom_timing_{i}")] 
-                for i, t in enumerate(TIMINGS)]
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="⏰ <b>Когда планируете покупку?</b>",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+# ════════════════════════════════════════════════
+# ОЧИСТКА ТЕКСТА
+# ════════════════════════════════════════════════
+def clean_text(text):
+    if not text:
+        return text
+    # Удаляем эмодзи
+    text = EMOJI_PATTERN.sub('', text)
+    # Удаляем статусные строки
+    text = re.sub(r'^[^\n]*[Вв]\s+продаже[^\n]*\n?', '', text, flags=re.IGNORECASE|re.MULTILINE)
+    text = re.sub(r'^[^\n]*[Вв]\s+свободной\s+продаже[^\n]*\n?', '', text, flags=re.IGNORECASE|re.MULTILINE)
+    text = re.sub(r'^[^\n]*АВТО\s+ИЗ\s+[А-ЯЁ]+[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^[^\n]*[Аа]вто\s+прибыло[^\n]*\n?', '', text, flags=re.IGNORECASE|re.MULTILINE)
+    text = re.sub(r'^[^\n]*\bСБХ\b[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^[^\n]*[Аа]вто\s+готово[^\n]*\n?', '', text, flags=re.IGNORECASE|re.MULTILINE)
+    text = re.sub(r'^[^\n]*срок\s+доставки[^\n]*\n?', '', text, flags=re.IGNORECASE|re.MULTILINE)
+    # Хэштеги
+    text = re.sub(r'#[A-Za-zА-Яа-яёЁ0-9_]+', '', text)
+    # Фразы из списка
+    for p in PHRASES_TO_DELETE:
+        text = re.sub(p, '', text, flags=re.IGNORECASE|re.MULTILINE)
+    # Имена менеджеров
+    text = re.sub(r'^.*[Мм]енеджер[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*[Аа]ртём[^\n]*\n?', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*[Рр]оман[^\n]*\n?', '', text, flags=re.MULTILINE)
+    # @каналы и ссылки
+    text = re.sub(r'@[A-Za-z0-9_]+', '', text)
+    text = re.sub(r'https?://[^\s]+', '', text)
+    text = re.sub(r'\+?\d[\d\s\-()]{6,}\d', '', text)
+    text = re.sub(r'Доставка\s+осуществляется[^\n]*', '', text, flags=re.IGNORECASE)
+    return text
 
-async def custom_ask_city(update, context, user_id):
-    """Шаг 6: Город доставки"""
-    state = get_user_state(user_id)
-    state['step'] = CUSTOM_ASK_CITY
-    
-    keyboard = []
-    row = []
-    for i, city in enumerate(CITIES):
-        row.append(InlineKeyboardButton(city, callback_data=f"custom_city_{i}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("✍️ Другой город", callback_data="custom_city_other")])
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="🏙 <b>В какой город нужна доставка?</b>",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+def markup_price(text):
+    def replace(m):
+        raw = re.sub(r'[\s,.\u00a0]','', m.group(1))
+        cur = m.group(2)
+        if cur in ('руб','RUB'): cur = '₽'
+        try:
+            p = int(raw)
+            if cur == '₽':
+                if p>=30_000_000: add=1_000_000
+                elif p>=25_000_000: add=500_000
+                elif p>=20_000_000: add=350_000
+                elif p>=15_000_000: add=250_000
+                elif p>=10_000_000: add=180_000
+                elif p>=7_000_000: add=100_000
+                elif p>=5_000_000: add=80_000
+                else: add=40_000
+            else: add=1_000
+            np = p+add
+            return f"{np:,}".replace(',','.')+cur
+        except: return m.group(0)
+    for pat in [r'(\d[\d\s.,\u00a0]*\d)\s*(₽|руб|RUB)',
+                r'(\d[\d\s.,\u00a0]*\d)\s*(€)',
+                r'(\d[\d\s.,\u00a0]*\d)\s*(\$)']:
+        text = re.sub(pat, replace, text)
+    return text
 
-async def custom_finalize(update, context, user_id):
-    """Завершение: Сохранение заявки (для индивидуального заказа)"""
-    state = get_user_state(user_id)
-    data = state['data']
-    user = update.effective_user
-    
-    lead_id = get_next_lead_id()
-    
-    lead_data = {
-        'user_id': user_id,
-        'username': user.username,
-        'first_name': user.first_name,
-        'last_name': user.last_name,
-        'brand': data.get('brand'),
-        'model': data.get('model'),
-        'generation': data.get('generation'),
-        'timing': data.get('timing'),
-        'city': data.get('city'),
-        'interest_type': 'custom'
-    }
-    
-    save_lead(lead_id, lead_data)
-    
-    # Формируем название авто
-    car_info = f"{data.get('brand', '')} {data.get('model', '')}".strip()
-    if data.get('generation') and data.get('generation') != 'Любое':
-        car_info += f" ({data['generation']})"
-    if not car_info or car_info.strip() == '':
-        car_info = "выбранный автомобиль"
-    
-    # Сообщение клиенту
-    client_text = (
-        f"✅ <b>Спасибо! Ваша заявка #{lead_id} принята</b>\n\n"
-        f"🚗 <b>Подбираем:</b> {car_info}\n"
-        f"📍 <b>Доставка в:</b> {data.get('city', '?')}\n"
-        f"⏰ <b>Срок:</b> {data.get('timing', '?')}\n\n"
-        f"📞 Менеджер свяжется с Вами в течение <b>1 часа</b>\n\n"
-        f"Благодарим за доверие к ProAuto ✅\n\n"
-        f"Наш канал с актуальными предложениями:\n"
-        f"{TARGET_CHANNEL_NAME}"
-    )
-    
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=client_text,
-        parse_mode='HTML'
-    )
-    
-    # Уведомление менеджеру
-    await notify_manager(context, lead_id, lead_data)
-    
-    clear_user_state(user_id)
+def format_text(text):
+    lines = text.split('\n')
+    result = []
+    for line in lines:
+        s = line.strip()
+        if not s: result.append(''); continue
+        if re.match(r'^[•\-–—\s:]+$', s): continue
+        s = re.sub(r'^[-–—]\s*', '', s)
+        if not s or re.match(r'^[•\s:]+$', s): continue
+        if s.startswith('•') or s.startswith('▪'):
+            c = re.sub(r'^[•▪]\s*', '', s)
+            c = re.sub(r'^[-–—]\s*', '', c)
+            if c and not re.match(r'^[\s:]+$', c): result.append(f'• {c}')
+            continue
+        if ':' in s and len(s.split(':')[0]) < 40 and not re.search(r'[₽€$]', s):
+            val = s.split(':',1)[1].strip()
+            if val: result.append(f'• {s}'); continue
+        result.append(s)
+    text = '\n'.join(result)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'^\s*[•\-–—]?\s*:\s*$', '', text, flags=re.MULTILINE)
+    return text.strip()
 
-# ════════════════════════════════════════════════════════════════════
-# СТАРТ БРИФА ДЛЯ КОНКРЕТНОГО АВТО (DEEP LINK)
-# ════════════════════════════════════════════════════════════════════
+def make_bold_model(text):
+    lines = text.split('\n')
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s and not s.startswith('•') and not s.startswith('<b>'):
+            lines[i] = f'<b>{s}</b>'
+            break
+    return '\n'.join(lines)
 
-async def start_brief_for_specific_car(update, context, pub_id):
-    """Старт брифа для конкретного авто (из deep link)"""
-    publication = find_publication(pub_id)
-    
-    if publication:
-        original = publication.get('original_caption', '')
-        lines = original.split('\n')
-        car_name = "выбранный автомобиль"
-        for line in lines:
-            stripped = line.strip()
-            if stripped and not stripped.startswith('•') and len(stripped) < 100:
-                car_name = stripped
-                break
+def make_bold_prices(text):
+    def bold(m):
+        l = m.group(1).strip()
+        return f'<b>{l}</b>' if not l.startswith('<b>') else l
+    return re.sub(r'^([^\n<]*\d[\d\s.,\u00a0]*\d\s*[₽€$][^\n<]*)$', bold, text, flags=re.MULTILINE)
+
+def make_headers_bold(text):
+    for h in ['Комплектация:', 'Состояние:', 'Комплектация и оснащение:']:
+        text = re.sub(re.escape(h), f'<b>{h}</b>', text, flags=re.IGNORECASE)
+    return text
+
+def insert_id(text, pub_id, link):
+    tag = f'<a href="{link}">{pub_id}</a>' if link else pub_id
+    lines = text.split('\n')
+    last_price = -1
+    for i, l in enumerate(lines):
+        if re.search(r'<b>[^<]*\d[^<]*[₽€$][^<]*</b>', l):
+            last_price = i
+    if last_price >= 0:
+        lines.insert(last_price+1, tag)
     else:
-        car_name = "автомобиль"
-    
-    user_id = update.effective_user.id
-    state = get_user_state(user_id)
-    
-    state['step'] = SPECIFIC_ASK_CITY
-    state['data'] = {
-        'pub_id': pub_id,
-        'car_name': car_name,
-        'source': 'deep_link',
-        'interest_type': 'specific_car'
-    }
-    
-    text = (
-        f"🚗 <b>{car_name}</b>\n\n"
-        f"✅ Отлично! Уточним пару деталей:"
-    )
-    
-    keyboard = []
-    row = []
-    for i, city in enumerate(CITIES):
-        row.append(InlineKeyboardButton(city, callback_data=f"specific_city_{i}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("✍️ Другой город", callback_data="specific_city_other")])
-    
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+        lines.append(tag)
+    return '\n'.join(lines)
 
-# ════════════════════════════════════════════════════════════════════
-# ОБЩИЙ БРИФ (БЕЗ DEEP LINK)
-# ════════════════════════════════════════════════════════════════════
+def build_footer(text, pub_id):
+    has_moscow = 'в москве' in text.lower() or 'во владивостоке' in text.lower()
+    sp = pub_id or 'start'
+    mgr = f'<a href="https://t.me/{BOT_USERNAME}?start={sp}">«Написать менеджеру»</a> 📞 ✅'
+    ch  = f'<a href="https://t.me/{TARGET_CHANNEL_NAME.replace("@","")}">{TARGET_CHANNEL_NAME}</a>'
+    order = f'🏎️ Заказать другое авто — <a href="https://t.me/{BOT_USERNAME}">жми сюда</a>'
+    if has_moscow or '₽' in text:
+        return (f"\n\nДоставка осуществляется во все города РФ\n\n"
+                f"По поводу покупки или подбора:\n{mgr}\n"
+                f"(Ответ в течении часа)\n{order}\n\n{ch}")
+    return (f"\n\nРассчитаем стоимость до Вашего дома 🏠 ✅\n{mgr}\n"
+            f"(Ответ в течении часа)\n{order}\n\n{ch}")
 
-async def start_general_brief(update, context):
-    """Старт общего брифа (для клиента без deep link)"""
-    user_id = update.effective_user.id
-    state = get_user_state(user_id)
-    
-    state['step'] = CUSTOM_ASK_BRAND_GROUP
-    state['data'] = {'source': 'direct', 'interest_type': 'custom'}
-    
-    text = (
-        f"Здравствуйте! 👋\n\n"
-        f"Я представляю компанию <b>ProAuto</b> — мы профессионально занимаемся "
-        f"подбором и доставкой автомобилей по всей России и СНГ.\n\n"
-        f"<b>Наши преимущества:</b>\n"
-        f"• ✅ Прозрачные цены без скрытых платежей\n"
-        f"• 🚗 Подбор автомобиля под любой бюджет\n"
-        f"• 📦 Доставка во все города РФ и СНГ\n"
-        f"• 📋 Полное юридическое сопровождение\n"
-        f"• 🛡 Гарантия качества и чистоты сделки\n\n"
-        f"<b>Какие марки Вас интересуют?</b>"
-    )
-    
-    keyboard = [[InlineKeyboardButton(g, callback_data=f"custom_bgroup_{i}")] 
-                for i, g in enumerate(BRAND_GROUPS.keys())]
-    keyboard.append([InlineKeyboardButton("🤔 Любая марка", callback_data="custom_bgroup_any")])
-    
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML',
-        disable_web_page_preview=True
-    )
-    # ════════════════════════════════════════════════════════════════════
-# CALLBACK HANDLER - ОБРАБОТКА КНОПОК (ИСПРАВЛЕННЫЙ БЕЗ ЦИКЛОВ)
-# ════════════════════════════════════════════════════════════════════
+def hashtags(text):
+    tags = set()
+    tl = text.lower()
+    for kw, tag in [('bmw','#BMW'),('mercedes','#Mercedes'),('audi','#Audi'),
+                    ('toyota','#Toyota'),('lexus','#Lexus'),('kia','#Kia'),
+                    ('hyundai','#Hyundai'),('volkswagen','#Volkswagen'),
+                    ('porsche','#Porsche'),('tesla','#Tesla'),
+                    ('geely','#Geely'),('haval','#Haval')]:
+        if kw in tl: tags.add(tag)
+        if len(tags) >= 2: break
+    return ' '.join(list(tags)[:2] + ['#авточастно','#автоподзаказ','#ProAuto77'])
 
-async def button_callback(update, context):
-    """Главный обработчик всех нажатий кнопок"""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    user_id = query.from_user.id
-    state = get_user_state(user_id)
-    
-    logger.info(f"🔘 Кнопка от {user_id}: {data[:30]}")
-    
-    # ═══════════════════════════════════════════════════════════════════
-    # ПУТЬ 1: КОНКРЕТНОЕ АВТО (SPECIFIC_CAR)
-    # ═══════════════════════════════════════════════════════════════════
-    
-    # Начало: клиент выбрал "Да, интересует этот авто"
-    if data.startswith("brief_yes_"):
-        pub_id = data.replace("brief_yes_", "")
-        await start_brief_for_specific_car(update, context, pub_id)
-        return
-    
-    # Шаг 1: Выбор города (SPECIFIC)
-    if data.startswith("specific_city_"):
-        if data == "specific_city_other":
-            state['data']['city'] = 'Другой (уточнить с менеджером)'
-        else:
-            try:
-                idx = int(data.replace("specific_city_", ""))
-                state['data']['city'] = CITIES[idx]
-            except:
-                state['data']['city'] = 'Неизвестно'
-        
-        logger.info(f"   🏙 Город: {state['data']['city']}")
-        
-        await query.edit_message_text(
-            f"🏙 Город: <b>{state['data']['city']}</b>\n\n⏰ Когда планируете покупку?",
-            parse_mode='HTML'
-        )
-        
-        # ПЕРЕХОД: спрашиваем срок
-        await specific_ask_timing(update, context, user_id)
-        return
-    
-    # Шаг 2: Выбор сроков (SPECIFIC) → ФИНАЛИЗАЦИЯ
-    if data.startswith("specific_timing_"):
-        try:
-            idx = int(data.replace("specific_timing_", ""))
-            state['data']['timing'] = TIMINGS[idx]
-        except:
-            state['data']['timing'] = 'Не указано'
-        
-        logger.info(f"   ⏰ Срок: {state['data']['timing']}")
-        
-        await query.edit_message_text(
-            f"⏰ Срок: <b>{state['data']['timing']}</b>\n\n✅ Спасибо за ответы!",
-            parse_mode='HTML'
-        )
-        
-        # ФИНАЛИЗАЦИЯ - сохраняем заявку
-        await specific_finalize(update, context, user_id)
-        return
-    
-    # ═══════════════════════════════════════════════════════════════════
-    # ПУТЬ 2: ИНДИВИДУАЛЬНЫЙ ЗАКАЗ (CUSTOM)
-    # ═══════════════════════════════════════════════════════════════════
-    
-    # Начало: клиент выбрал "Индивидуальный заказ"
-    if data == "brief_custom":
-        state['step'] = CUSTOM_ASK_BRAND_GROUP
-        state['data'] = {'source': 'direct', 'interest_type': 'custom'}
-        
-        await query.edit_message_text("🔍 Подберём идеальное авто для Вас!")
-        
-        # ПЕРЕХОД: спрашиваем группу марок
-        await custom_ask_brand_group(update, context, user_id)
-        return
-    
-    # Шаг 1: Выбор группы марок (CUSTOM)
-    if data.startswith("custom_bgroup_"):
-        if data == "custom_bgroup_any":
-            state['data']['brand'] = 'Любая'
-            state['data']['model'] = 'Любая'
-            state['data']['generation'] = 'Любое'
-            
-            logger.info(f"   🚗 Марка: Любая")
-            
-            await query.edit_message_text("🚗 Марка: <b>Любая</b>\n\n⏰ Когда планируете покупку?")
-            
-            # ПЕРЕХОД: сразу спрашиваем сроки (пропускаем марку/модель/поколение)
-            await custom_ask_timing(update, context, user_id)
-            return
-        
-        try:
-            group_idx = int(data.replace("custom_bgroup_", ""))
-        except:
-            return
-        
-        logger.info(f"   📁 Группа марок: {list(BRAND_GROUPS.keys())[group_idx]}")
-        
-        # ПЕРЕХОД: спрашиваем конкретную марку
-        await custom_ask_brand(update, context, user_id, group_idx)
-        return
-    
-    # Шаг 2: Выбор конкретной марки (CUSTOM)
-    if data.startswith("custom_brand_"):
-        try:
-            parts = data.split("_")
-            group_idx = int(parts[2])
-            brand_idx = int(parts[3])
-            
-            group_name = list(BRAND_GROUPS.keys())[group_idx]
-            brand = BRAND_GROUPS[group_name][brand_idx]
-            
-            state['data']['brand'] = brand
-            state['data']['brand_group'] = group_name
-            
-            logger.info(f"   🏷 Марка: {brand}")
-            
-            await query.edit_message_text(f"✅ Марка: <b>{brand}</b>\n\nВыбираем модель...")
-        except Exception as e:
-            logger.error(f"Ошибка выбора марки: {e}")
-            return
-        
-        # ПЕРЕХОД: спрашиваем модель
-        await custom_ask_model(update, context, user_id)
-        return
-    
-    # Шаг 3: Выбор модели (CUSTOM)
-    if data.startswith("custom_model_"):
-        try:
-            idx = int(data.replace("custom_model_", ""))
-            brand = state['data'].get('brand')
-            
-            if not brand:
-                logger.error("Нет марки в state")
-                return
-            
-            models = get_models(brand)
-            if idx >= len(models):
-                logger.error(f"Индекс модели выходит за границы: {idx}")
-                return
-            
-            model = models[idx]
-            state['data']['model'] = model
-            
-            logger.info(f"   📋 Модель: {model}")
-            
-            await query.edit_message_text(f"✅ Модель: <b>{model}</b>\n\nВыбираем поколение...")
-        except Exception as e:
-            logger.error(f"Ошибка выбора модели: {e}")
-            return
-        
-        # ПЕРЕХОД: спрашиваем поколение
-        await custom_ask_generation(update, context, user_id)
-        return
-    
-    # Шаг 4: Выбор поколения (CUSTOM)
-    if data.startswith("custom_gen_"):
-        try:
-            idx = int(data.replace("custom_gen_", ""))
-            brand = state['data'].get('brand')
-            model = state['data'].get('model')
-            
-            if not brand or not model:
-                logger.error("Нет марки или модели в state")
-                return
-            
-            generations = get_generations(brand, model)
-            if idx >= len(generations):
-                logger.error(f"Индекс поколения выходит за границы: {idx}")
-                return
-            
-            generation = generations[idx]
-            state['data']['generation'] = generation
-            
-            logger.info(f"   👶 Поколение: {generation}")
-            
-            await query.edit_message_text(f"✅ Поколение: <b>{generation}</b>\n\n⏰ Сроки покупки...")
-        except Exception as e:
-            logger.error(f"Ошибка выбора поколения: {e}")
-            return
-        
-        # ПЕРЕХОД: спрашиваем сроки
-        await custom_ask_timing(update, context, user_id)
-        return
-    
-    # Шаг 5: Выбор сроков (CUSTOM)
-    if data.startswith("custom_timing_"):
-        try:
-            idx = int(data.replace("custom_timing_", ""))
-            state['data']['timing'] = TIMINGS[idx]
-        except:
-            state['data']['timing'] = 'Не указано'
-        
-        logger.info(f"   ⏰ Срок: {state['data']['timing']}")
-        
-        await query.edit_message_text(
-            f"⏰ Срок: <b>{state['data']['timing']}</b>\n\n🏙 Выбираем город доставки...",
-            parse_mode='HTML'
-        )
-        
-        # ПЕРЕХОД: спрашиваем город
-        await custom_ask_city(update, context, user_id)
-        return
-    
-    # Шаг 6: Выбор города (CUSTOM) → ФИНАЛИЗАЦИЯ
-    if data.startswith("custom_city_"):
-        if data == "custom_city_other":
-            state['data']['city'] = 'Другой (уточнить с менеджером)'
-        else:
-            try:
-                idx = int(data.replace("custom_city_", ""))
-                state['data']['city'] = CITIES[idx]
-            except:
-                state['data']['city'] = 'Неизвестно'
-        
-        logger.info(f"   🏙 Город: {state['data']['city']}")
-        
-        await query.edit_message_text(
-            f"🏙 Город: <b>{state['data']['city']}</b>\n\n✅ Спасибо за ответы!",
-            parse_mode='HTML'
-        )
-        
-        # ФИНАЛИЗАЦИЯ - сохраняем заявку
-        await custom_finalize(update, context, user_id)
-        return
-    
-    # ═══════════════════════════════════════════════════════════════════
-    # НАВИГАЦИЯ "НАЗАД"
-    # ═══════════════════════════════════════════════════════════════════
-    
-    # Назад к группам марок
-    if data == "custom_back_to_groups":
-        logger.info("   ⬅️ Назад: к группам марок")
-        await custom_ask_brand_group(update, context, user_id)
-        return
-    
-    # Назад к маркам
-    if data == "custom_back_to_brands":
-        logger.info("   ⬅️ Назад: к маркам")
-        group_idx = state['data'].get('brand_group_idx', 0)
-        await custom_ask_brand(update, context, user_id, group_idx)
-        return
-    
-    # Назад к моделям
-    if data == "custom_back_to_models":
-        logger.info("   ⬅️ Назад: к моделям")
-        await custom_ask_model(update, context, user_id)
-        return
-    
-    # ═══════════════════════════════════════════════════════════════════
-    # ВОПРОС (ДРУГОЕ)
-    # ═══════════════════════════════════════════════════════════════════
-    
-    if data == "brief_question":
-        logger.info("   ❓ Клиент выбрал: У меня другой вопрос")
-        state['data']['interest_type'] = 'question'
-        await query.edit_message_text(
-            f"💬 <b>Напишите Ваш вопрос менеджеру:</b>\n\n"
-            f"📞 <a href='{MANAGER_LINK}'>«Написать менеджеру»</a> 📞 ✅\n"
-            f"(Ответ в течении часа)",
-            parse_mode='HTML'
-        )
-        clear_user_state(user_id)
-        return
-
-    # ✍️ КОНСУЛЬТАЦИЯ
-    if data == "brief_consult":
-        logger.info("   ✍️ Клиент выбрал: Консультация")
-        user = query.from_user
-        lead_id = get_next_lead_id()
-        
-        pub_id = state['data'].get('pub_id', '')
-        car_name = state['data'].get('car_name', '')
-        
-        lead_data = {
-            'user_id': user_id,
-            'username': user.username,
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            'pub_id': pub_id,
-            'car_name': car_name,
-            'interest_type': 'consultation',
-            'city': None,
-            'timing': None,
-        }
-        save_lead(lead_id, lead_data)
-        
-        # Сообщение клиенту
-        await query.edit_message_text(
-            f"✅ <b>Спасибо! Ваша заявка #{lead_id} принята</b>\n\n"
-            f"✍️ Запрос консультации\n\n"
-            f"Менеджер свяжется с Вами в течение 1 часа\n"
-            f"Благодарим за доверие к ProAuto ✅\n\n"
-            f"Наш канал с актуальными предложениями:\n"
-            f"<a href='https://t.me/{TARGET_CHANNEL_NAME.replace('@','')}'>"
-            f"{TARGET_CHANNEL_NAME}</a>",
-            parse_mode='HTML',
-            disable_web_page_preview=True
-        )
-        
-        # Уведомление менеджеру
-        await notify_manager(context, lead_id, lead_data)
-        clear_user_state(user_id)
-        return
-
-    logger.warning(f"⚠️ Неизвестная кнопка: {data}")
-    # ════════════════════════════════════════════════════════════════════
-# КОМАНДА /START (DEEP LINKING)
-# ════════════════════════════════════════════════════════════════════
-
-# Бренды для умного извлечения названия авто
-    # _CAR_BRANDS_FOR_EXTRACT и _SKIP_PATTERNS_EXTRACT определены выше
-
-
-
-def extract_car_name_from_pub(pub_id):
-    """
-    Умное извлечение названия авто из оригинального текста.
-    Пропускает статусные строки, ищет строку с брендом.
-    """
-    pub = find_publication(pub_id)
-    if not pub:
-        return None
-    original = pub.get('original_caption', '')
-    if not original:
-        return None
-
-    lines = original.split('\n')
-
-    # Приоритет 1: строка содержит известный бренд авто
-    for line in lines:
-        clean = EMOJI_PATTERN.sub('', line).strip()
-        clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
-        if not clean or len(clean) < 3:
-            continue
-        for brand in _CAR_BRANDS_FOR_EXTRACT:
-            if brand.lower() in clean.lower():
-                # Убираем статусные слова из строки
-                name = re.sub(
-                    r'\bв\s+продаже\b|\bв\s+наличии\b|\bпродаю\b',
-                    '', clean, flags=re.IGNORECASE
-                )
-                name = re.sub(r'[‼!🔥]+', '', name).strip()
-                if len(name) > 3:
-                    logger.info(f"   🚗 Бренд найден: [{name[:60]}]")
-                    return name[:80]
-
-    # Приоритет 2: первая нормальная строка без цены и двоеточий
-    for line in lines:
-        clean = EMOJI_PATTERN.sub('', line).strip()
-        clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
-        if not clean or len(clean) < 6 or len(clean) > 100:
-            continue
-        skip = any(
-            re.search(p, clean, re.IGNORECASE)
-            for p in _SKIP_PATTERNS_EXTRACT
-        )
-        if skip:
-            continue
-        if (not re.search(r'[₽€$]|\d{4,}', clean) and
-                ':' not in clean and
-                clean[0].isupper()):
-            logger.info(f"   🚗 Название (fallback): [{clean[:60]}]")
-            return clean[:80]
-
+def smart_car_name(original):
+    if not original: return None
+    for line in original.split('\n'):
+        c = EMOJI_PATTERN.sub('', line).strip()
+        c = re.sub(r'^[-–—•*]\s*', '', c).strip()
+        if not c or len(c) < 3: continue
+        for brand in CAR_BRANDS:
+            if brand.lower() in c.lower():
+                name = re.sub(r'\bв\s+продаже\b|\bв\s+наличии\b', '', c, flags=re.IGNORECASE)
+                name = re.sub(r'[‼!]+', '', name).strip()
+                if len(name) > 3: return name[:80]
     return None
 
+def format_announcement(original, pub_id, pub_link):
+    if not original: return None
+    t = clean_text(original)
+    t = markup_price(t)
+    if re.search(r'в москве', t, re.IGNORECASE):
+        t = re.sub(r'^.*Цена.*в (?:Уссурийске|Владивостоке).*\n?', '', t,
+                   flags=re.IGNORECASE|re.MULTILINE)
+    t = format_text(t)
+    t = make_headers_bold(t)
+    t = make_bold_model(t)
+    t = make_bold_prices(t)
+    t = re.sub(r'\n{3,}', '\n\n', t).strip()
+    t = insert_id(t, pub_id, pub_link)
+    header = "Прямая продажа ✅\n\n"
+    footer = build_footer(t, pub_id)
+    ht = hashtags(original)
+    return header + t + footer + (f"\n\n{ht}" if ht else "")
 
-async def start_command(update, context):
-    """Команда /start с поддержкой deep linking"""
-    user_id = update.effective_user.id
-    args = context.args
-    logger.info(f"👤 /start от ID:{user_id}, args: {args}")
+# ════════════════════════════════════════════════
+# ПУБЛИКАЦИЯ ОБЪЯВЛЕНИЙ
+# ════════════════════════════════════════════════
+def fwd_source(message):
+    if not message.forward_from_chat:
+        return {'is_forwarded': False}
+    return {
+        'is_forwarded': True,
+        'source_chat_id': message.forward_from_chat.id,
+        'source_message_id': message.forward_from_message_id,
+        'source_chat_username': message.forward_from_chat.username,
+    }
 
-    if args:
-        param = args[0]
+def orig_link(src):
+    if not src.get('is_forwarded'): return None
+    mid = src['source_message_id']
+    un  = src['source_chat_username']
+    cid = src['source_chat_id']
+    if un: return f"https://t.me/{un}/{mid}"
+    cid_s = str(cid)[4:] if str(cid).startswith('-100') else str(abs(cid))
+    return f"https://t.me/c/{cid_s}/{mid}"
 
-        # Deep link из объявления: id_0001, id_0002...
-        if param.startswith('id_'):
-            logger.info(f"🔗 Deep link: {param}")
-            pub_id = param
-            car_name = extract_car_name_from_pub(pub_id) or 'автомобиль'
+def pub_link(msg_id):
+    return f"https://t.me/{TARGET_CHANNEL_NAME.replace('@','')}/{msg_id}"
 
-            state = get_user_state(user_id)
-            state['step'] = SPECIFIC_ASK_CITY
-            state['data'] = {
-                'pub_id': pub_id,
-                'car_name': car_name,
-                'interest_type': 'specific_car'
-            }
+def is_valid(text, has_media):
+    if not has_media: return False, "нет медиа"
+    if not text or len(text) < 5: return True, "OK"
+    has_p = bool(re.search(r'\d[\d\s.,]*\d\s*[₽€$]', text))
+    has_k = bool(re.search(
+        r'BMW|Mercedes|Audi|Toyota|Kia|Hyundai|Volkswagen|Porsche|'
+        r'Honda|Nissan|Mazda|Geely|Haval|BYD|Tesla|Lexus|Volvo|'
+        r'авто|машин|двигател', text, re.IGNORECASE))
+    return (True, "OK") if (has_p or has_k) else (False, "не авто")
 
-            # Ограничиваем длину названия в кнопке
-            btn_car_name = car_name[:45] if car_name else 'этот автомобиль'
+async def publish(update, context, src):
+    msg = update.message
+    mgid = msg.media_group_id
+    text = msg.text or msg.caption or ""
+    has_photo = bool(msg.photo)
+    has_video = bool(msg.video)
 
-            keyboard = [
-                [InlineKeyboardButton(
-                    f"✅ {btn_car_name}",
-                    callback_data=f"brief_yes_{pub_id}"
-                )],
-                [InlineKeyboardButton(
-                    "🏎️ Другой автомобиль",
-                    callback_data="brief_custom"
-                )],
-                [InlineKeyboardButton(
-                    "✍️ Консультация",
-                    callback_data="brief_consult"
-                )],
-            ]
+    if mgid:
+        if mgid not in media_groups_cache:
+            media_groups_cache[mgid] = {'photos':[], 'caption':'', 'src':src}
+            asyncio.create_task(_process_album(mgid, context))
+        if msg.photo:
+            media_groups_cache[mgid]['photos'].append(msg.photo[-1].file_id)
+        if msg.video:
+            media_groups_cache[mgid]['photos'].append(msg.video.file_id)
+        if msg.caption and not media_groups_cache[mgid]['caption']:
+            media_groups_cache[mgid]['caption'] = msg.caption
+        return
 
+    valid, reason = is_valid(text, has_photo or has_video)
+    if not valid:
+        logger.info(f"⏭ {reason}")
+        return
+
+    pid = next_pub_id()
+    sl  = orig_link(src) if src else None
+    fmt = format_announcement(text, pid, None)
+    if not fmt: return
+
+    try:
+        if has_photo:
+            sent = await context.bot.send_photo(
+                chat_id=TARGET_GROUP_ID,
+                photo=msg.photo[-1].file_id,
+                caption=fmt, parse_mode='HTML')
+        elif has_video:
+            sent = await context.bot.send_video(
+                chat_id=TARGET_GROUP_ID,
+                video=msg.video.file_id,
+                caption=fmt, parse_mode='HTML')
+        else:
+            sent = await context.bot.send_message(
+                chat_id=TARGET_GROUP_ID, text=fmt, parse_mode='HTML')
+
+        pmid = sent.message_id
+        pl   = pub_link(pmid)
+        new  = format_announcement(text, pid, pl)
+        try:
+            if has_photo or has_video:
+                await context.bot.edit_message_caption(
+                    chat_id=TARGET_GROUP_ID, message_id=pmid,
+                    caption=new, parse_mode='HTML')
+            else:
+                await context.bot.edit_message_text(
+                    chat_id=TARGET_GROUP_ID, message_id=pmid,
+                    text=new, parse_mode='HTML')
+        except: pass
+
+        save_pub(pid, source_link=sl,
+                 source_username=src.get('source_chat_username') if src else None,
+                 published_message_id=pmid,
+                 original_caption=text,
+                 telegram_link=pl)
+        logger.info(f"✅ {pid}")
+    except Exception as e:
+        logger.error(f"❌ publish: {e}")
+
+async def _process_album(mgid, context):
+    await asyncio.sleep(3)
+    if mgid not in media_groups_cache: return
+    gd = media_groups_cache[mgid]
+    photos, caption, src = gd['photos'], gd['caption'], gd['src']
+    if not photos:
+        del media_groups_cache[mgid]; return
+    valid, reason = is_valid(caption, True)
+    if not valid:
+        del media_groups_cache[mgid]; return
+    pid = next_pub_id()
+    sl  = orig_link(src) if src else None
+    fmt = format_announcement(caption, pid, None)
+    if not fmt:
+        del media_groups_cache[mgid]; return
+    try:
+        media = [InputMediaPhoto(media=photos[0], caption=fmt, parse_mode='HTML')] + \
+                [InputMediaPhoto(media=p) for p in photos[1:]]
+        sent = await context.bot.send_media_group(chat_id=TARGET_GROUP_ID, media=media)
+        pmid = sent[0].message_id if sent else None
+        if pmid:
+            pl  = pub_link(pmid)
+            new = format_announcement(caption, pid, pl)
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=TARGET_GROUP_ID, message_id=pmid,
+                    caption=new, parse_mode='HTML')
+            except: pass
+            save_pub(pid, source_link=sl,
+                     source_username=src.get('source_chat_username') if src else None,
+                     published_message_id=pmid,
+                     original_caption=caption,
+                     telegram_link=pl)
+        logger.info(f"✅ Альбом {pid}")
+    except Exception as e:
+        logger.error(f"❌ album: {e}")
+    finally:
+        if mgid in media_groups_cache: del media_groups_cache[mgid]
+
+# ════════════════════════════════════════════════
+# УВЕДОМЛЕНИЕ МЕНЕДЖЕРУ
+# ════════════════════════════════════════════════
+async def notify(context, lid, data):
+    uid  = data['user_id']
+    un   = data.get('username')
+    fn   = data.get('first_name','Клиент')
+    text = f"🆕 <b>ЗАЯВКА {lid}</b>\n\n"
+    if un: text += f"👤 @{un} ({fn})\n"
+    text += f"🆔 <code>{uid}</code>\n\n"
+    if data.get('pub_id'):
+        text += f"🚗 {data.get('car_name','')}\n({data['pub_id']})\n\n"
+    text += "<b>Параметры:</b>\n"
+    for k,l in [('brand','Марка'),('model','Модель'),('generation','Поколение'),
+                ('city','Город'),('timing','Срок')]:
+        if data.get(k): text += f"• {l}: {data[k]}\n"
+    if un:
+        text += f"\n💬 <a href='https://t.me/{un}'>Написать @{un}</a>"
+    else:
+        text += f"\n💬 <a href='tg://user?id={uid}'>{fn} (нажми)</a>"
+        text += f"\n   ID: <code>{uid}</code>"
+    for rid in [OWNER_ID, MANAGER_USER_ID]:
+        if rid:
+            try: await context.bot.send_message(chat_id=rid, text=text, parse_mode='HTML')
+            except Exception as e: logger.error(f"notify {rid}: {e}")
+
+# ════════════════════════════════════════════════
+# БРИФ — ФИНАЛИЗАЦИЯ
+# ════════════════════════════════════════════════
+async def finalize(update, context, uid, data_extra=None):
+    st   = get_state(uid)
+    data = st['data']
+    if data_extra: data.update(data_extra)
+    user = update.effective_user
+    lid  = next_lead_id()
+    ld   = {'user_id':uid, 'username':user.username,
+            'first_name':user.first_name, 'last_name':user.last_name, **data}
+    save_lead(lid, ld)
+
+    if data.get('interest_type') == 'consultation':
+        msg = (f"✅ <b>Спасибо! Заявка #{lid} принята</b>\n\n"
+               f"✍️ Запрос консультации\n\nМенеджер свяжется с Вами в течение 1 часа\n"
+               f"Благодарим за доверие к ProAuto ✅\n\n{TARGET_CHANNEL_NAME}")
+    elif data.get('pub_id'):
+        msg = (f"✅ <b>Заявка #{lid} принята</b>\n\n"
+               f"🚗 {data.get('car_name','авто')}\n"
+               f"📍 {data.get('city','?')}\n⏰ {data.get('timing','?')}\n\n"
+               f"Менеджер свяжется с Вами в течение 1 часа\n"
+               f"Благодарим за доверие к ProAuto ✅\n\n{TARGET_CHANNEL_NAME}")
+    else:
+        car = f"{data.get('brand','')} {data.get('model','')}".strip()
+        if data.get('generation'): car += f" ({data['generation']})"
+        msg = (f"✅ <b>Заявка #{lid} принята</b>\n\n"
+               f"🚗 {car or 'Авто на заказ'}\n"
+               f"📍 {data.get('city','?')}\n⏰ {data.get('timing','?')}\n\n"
+               f"Менеджер свяжется с Вами в течение 1 часа\n"
+               f"Благодарим за доверие к ProAuto ✅\n\n{TARGET_CHANNEL_NAME}")
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
+    await notify(context, lid, ld)
+    clear_state(uid)
+
+# ════════════════════════════════════════════════
+# CALLBACK КНОПОК
+# ════════════════════════════════════════════════
+def city_kb(prefix):
+    kb, row = [], []
+    for i, c in enumerate(CITIES):
+        row.append(InlineKeyboardButton(c, callback_data=f"{prefix}city_{i}"))
+        if len(row)==2: kb.append(row); row=[]
+    if row: kb.append(row)
+    kb.append([InlineKeyboardButton("✍️ Другой город", callback_data=f"{prefix}city_other")])
+    return kb
+
+def timing_kb(prefix):
+    return [[InlineKeyboardButton(t, callback_data=f"{prefix}timing_{i}")]
+            for i,t in enumerate(TIMINGS)]
+
+async def button_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    d  = q.data
+    uid = q.from_user.id
+    st  = get_state(uid)
+
+    # ── КОНКРЕТНОЕ АВТО ──────────────────────────
+    if d.startswith("yes_"):
+        pid = d[4:]
+        pub = find_pub(pid)
+        cn  = smart_car_name(pub.get('original_caption','') if pub else '') or 'автомобиль'
+        st['data'] = {'pub_id':pid,'car_name':cn,'interest_type':'specific_car'}
+        await q.edit_message_text(f"✅ {cn[:50]}\n\nВ какой город?", parse_mode='HTML')
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="🏙 <b>В какой город нужна доставка?</b>",
+            reply_markup=InlineKeyboardMarkup(city_kb("s_")), parse_mode='HTML')
+        return
+
+    if d.startswith("s_city_"):
+        idx = d[7:]
+        st['data']['city'] = CITIES[int(idx)] if idx!='other' else 'Другой'
+        await q.edit_message_text(f"🏙 {st['data']['city']}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="⏰ <b>Когда планируете покупку?</b>",
+            reply_markup=InlineKeyboardMarkup(timing_kb("s_")), parse_mode='HTML')
+        return
+
+    if d.startswith("s_timing_"):
+        st['data']['timing'] = TIMINGS[int(d[9:])]
+        await q.edit_message_text(f"⏰ {st['data']['timing']} ✅")
+        await finalize(update, context, uid)
+        return
+
+    # ── КОНСУЛЬТАЦИЯ ─────────────────────────────
+    if d == "consult":
+        st['data']['interest_type'] = 'consultation'
+        await q.edit_message_text("✍️ Оформляем запрос консультации...")
+        await finalize(update, context, uid)
+        return
+
+    # ── ИНДИВИДУАЛЬНЫЙ ЗАКАЗ ─────────────────────
+    if d == "custom":
+        st['data'] = {'interest_type':'custom'}
+        kb = [[InlineKeyboardButton(g, callback_data=f"bg_{i}")]
+              for i,g in enumerate(BRAND_GROUPS.keys())]
+        kb.append([InlineKeyboardButton("🤔 Любая марка", callback_data="bg_any")])
+        await q.edit_message_text("🚗 <b>Какие марки интересуют?</b>",
+                                  reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        return
+
+    if d == "bg_any":
+        st['data'].update({'brand':'Любая','model':'Любая','generation':'Любое'})
+        await q.edit_message_text("🚗 Марка: Любая")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="⏰ <b>Когда планируете покупку?</b>",
+            reply_markup=InlineKeyboardMarkup(timing_kb("c_")), parse_mode='HTML')
+        return
+
+    if d.startswith("bg_"):
+        try:
+            gi = int(d[3:])
+            gn = list(BRAND_GROUPS.keys())[gi]
+            brands = BRAND_GROUPS[gn]
+            st['data']['gidx'] = gi
+            kb, row = [], []
+            for i,b in enumerate(brands):
+                row.append(InlineKeyboardButton(b, callback_data=f"br_{gi}_{i}"))
+                if len(row)==2: kb.append(row); row=[]
+            if row: kb.append(row)
+            kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="custom")])
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=(
-                    f"Здравствуйте! 👋\n\n"
-                    f"Большое спасибо за Ваше обращение!\n"
-                    f"Что Вас интересует?"
-                ),
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='HTML'
-            )
-            return
-
-        if param.startswith('utm_'):
-            state = get_user_state(user_id)
-            state['data']['utm_source'] = param.replace('utm_', '')
-
-    # Владелец / менеджер
-    if has_publish_rights(user_id):
-        await update.message.reply_text(
-            f"🚀 <b>PROAUTO BOT v14 — Панель</b>\n\n"
-            f"• 📤 Пересылай объявления → публикую в {TARGET_CHANNEL_NAME}\n"
-            f"• 📹 Фото и видео — оба работают\n"
-            f"• 🔎 /export id_XXXX → текст для площадок\n"
-            f"• 📊 /stats → статистика\n"
-            f"• 📋 /leads → заявки",
-            parse_mode='HTML'
-        )
-    else:
-        await start_general_brief(update, context)
-
-# ════════════════════════════════════════════════════════════════════
-# КОМАНДА /STATS
-# ════════════════════════════════════════════════════════════════════
-
-async def stats_command(update, context):
-    """Статистика публикаций и заявок"""
-    user_id = update.effective_user.id
-    
-    if not has_publish_rights(user_id):
-        await update.message.reply_text("❌ Нет прав")
+                text=f"<b>{gn}</b>\n\nВыберите марку:",
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        except: pass
         return
-    
-    pubs_db = load_db(PUBLICATIONS_DB, {'counter': 0, 'publications': {}})
-    leads_db = load_db(LEADS_DB, {'counter': 0, 'leads': {}})
-    
-    total_pubs = pubs_db.get('counter', 0)
-    total_leads = leads_db.get('counter', 0)
-    
-    # Статистика за 7 дней
-    week_ago = datetime.now() - timedelta(days=7)
-    
-    recent_pubs = 0
-    for pub in pubs_db['publications'].values():
+
+    if d.startswith("br_"):
         try:
-            pub_date = datetime.fromisoformat(pub.get('published_at', ''))
-            if pub_date > week_ago:
-                recent_pubs += 1
-        except:
-            pass
-    
-    recent_leads = 0
-    for lead in leads_db['leads'].values():
+            parts = d.split("_")
+            gi,bi = int(parts[1]), int(parts[2])
+            brand = BRAND_GROUPS[list(BRAND_GROUPS.keys())[gi]][bi]
+            st['data']['brand'] = brand
+            await q.edit_message_text(f"✅ Марка: <b>{brand}</b>", parse_mode='HTML')
+            models = get_models(brand)
+            if not models:
+                st['data']['model'] = 'Любая'
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⏰ <b>Когда планируете?</b>",
+                    reply_markup=InlineKeyboardMarkup(timing_kb("c_")), parse_mode='HTML')
+                return
+            kb, row = [], []
+            for i,m in enumerate(models):
+                row.append(InlineKeyboardButton(m, callback_data=f"mo_{i}"))
+                if len(row)==2: kb.append(row); row=[]
+            if row: kb.append(row)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"<b>{brand}</b> — выберите модель:",
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"br_ error: {e}")
+        return
+
+    if d.startswith("mo_"):
         try:
-            lead_date = datetime.fromisoformat(lead.get('created_at', ''))
-            if lead_date > week_ago:
-                recent_leads += 1
-        except:
-            pass
-    
-    text = (
-        f"📊 <b>СТАТИСТИКА</b>\n\n"
-        f"📢 <b>Публикации:</b>\n"
-        f"• Всего: {total_pubs}\n"
-        f"• За 7 дней: {recent_pubs}\n\n"
-        f"📋 <b>Заявки:</b>\n"
-        f"• Всего: {total_leads}\n"
-        f"• За 7 дней: {recent_leads}\n\n"
-        f"📈 Конверсия: {round(recent_leads / max(recent_pubs, 1) * 100, 1)}% (заявки/публикации)"
-    )
-    
-    await update.message.reply_text(text, parse_mode='HTML')
-
-# ════════════════════════════════════════════════════════════════════
-# КОМАНДА /LEADS
-# ════════════════════════════════════════════════════════════════════
-
-async def leads_command(update, context):
-    """Последние заявки"""
-    user_id = update.effective_user.id
-    
-    if not has_publish_rights(user_id):
-        await update.message.reply_text("❌ Нет прав")
+            idx   = int(d[3:])
+            brand = st['data'].get('brand','')
+            model = get_models(brand)[idx]
+            st['data']['model'] = model
+            await q.edit_message_text(f"✅ Модель: <b>{model}</b>", parse_mode='HTML')
+            gens = get_generations(brand, model)
+            if not gens:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⏰ <b>Когда планируете?</b>",
+                    reply_markup=InlineKeyboardMarkup(timing_kb("c_")), parse_mode='HTML')
+                return
+            kb = [[InlineKeyboardButton(g, callback_data=f"ge_{i}")]
+                  for i,g in enumerate(gens)]
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"<b>{brand} {model}</b> — поколение:",
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"mo_ error: {e}")
         return
-    
-    leads_db = load_db(LEADS_DB, {'counter': 0, 'leads': {}})
-    
-    if not leads_db['leads']:
-        await update.message.reply_text("📋 Заявок пока нет")
-        return
-    
-    # Берём последние 10
-    leads_list = list(leads_db['leads'].items())
-    leads_list.sort(key=lambda x: x[1].get('created_at', ''), reverse=True)
-    last_leads = leads_list[:10]
-    
-    text = f"📋 <b>ПОСЛЕДНИЕ ЗАЯВКИ ({len(last_leads)} из {leads_db['counter']})</b>\n\n"
-    
-    for lead_id, lead in last_leads:
+
+    if d.startswith("ge_"):
         try:
-            created = datetime.fromisoformat(lead.get('created_at', ''))
-            date_str = created.strftime('%d.%m %H:%M')
-        except:
-            date_str = "?"
-        
-        username = lead.get('username', '?')
-        first_name = lead.get('first_name', '')
-        
-        text += f"<b>{lead_id}</b> | {date_str}\n"
-        text += f"👤 @{username} ({first_name})\n"
-        
-        if lead.get('pub_id'):
-            text += f"🚗 {lead.get('car_name', 'авто')[:40]}\n"
-        elif lead.get('brand'):
-            text += f"🔍 {lead.get('brand', '')} {lead.get('model', '')}\n"
-        
-        if lead.get('city'):
-            text += f"🏙 {lead['city']}\n"
-        if lead.get('timing'):
-            text += f"⏰ {lead['timing']}\n"
-        
-        text += "━━━━━━━━━━\n"
-    
-    # Telegram ограничивает сообщение на 4096 символов
-    if len(text) > 4000:
-        text = text[:3950] + "\n\n... (сокращено)"
-    
-    await update.message.reply_text(text, parse_mode='HTML')
-
-# ════════════════════════════════════════════════════════════════════
-# КОМАНДА /EXPORT (экспорт текстов для площадок)
-# ════════════════════════════════════════════════════════════════════
-
-async def export_command(update, context):
-    """Экспорт текста для Авито/ВК/Дром"""
-    user_id = update.effective_user.id
-    
-    if not has_publish_rights(user_id):
-        await update.message.reply_text("❌ Нет прав")
+            brand = st['data'].get('brand','')
+            model = st['data'].get('model','')
+            gen   = get_generations(brand, model)[int(d[3:])]
+            st['data']['generation'] = gen
+            await q.edit_message_text(f"✅ Поколение: <b>{gen}</b>", parse_mode='HTML')
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⏰ <b>Когда планируете?</b>",
+                reply_markup=InlineKeyboardMarkup(timing_kb("c_")), parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"ge_ error: {e}")
         return
-    
+
+    if d.startswith("c_timing_"):
+        st['data']['timing'] = TIMINGS[int(d[9:])]
+        await q.edit_message_text(f"⏰ {st['data']['timing']}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="🏙 <b>В какой город?</b>",
+            reply_markup=InlineKeyboardMarkup(city_kb("c_")), parse_mode='HTML')
+        return
+
+    if d.startswith("c_city_"):
+        idx = d[7:]
+        st['data']['city'] = CITIES[int(idx)] if idx!='other' else 'Другой'
+        await q.edit_message_text(f"🏙 {st['data']['city']} ✅")
+        await finalize(update, context, uid)
+        return
+
+# ════════════════════════════════════════════════
+# КОМАНДЫ
+# ════════════════════════════════════════════════
+async def cmd_start(update, context):
+    uid  = update.effective_user.id
     args = context.args
-    
-    if not args:
+
+    if args and args[0].startswith('id_'):
+        pid = args[0]
+        pub = find_pub(pid)
+        cn  = smart_car_name(pub.get('original_caption','') if pub else '') or 'автомобиль'
+        get_state(uid)['data'] = {'pub_id':pid,'car_name':cn,'interest_type':'specific_car'}
+        btn_name = cn[:45]
+        kb = [
+            [InlineKeyboardButton(f"✅ {btn_name}", callback_data=f"yes_{pid}")],
+            [InlineKeyboardButton("🏎️ Другой автомобиль", callback_data="custom")],
+            [InlineKeyboardButton("✍️ Консультация",     callback_data="consult")],
+        ]
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Здравствуйте! 👋\n\nБольшое спасибо за Ваше обращение!\nЧто Вас интересует?",
+            reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if has_rights(uid):
         await update.message.reply_text(
-            "📤 <b>Экспорт текстов для площадок</b>\n\n"
-            "Используй: <code>/export id_0001</code>\n\n"
-            "Получишь текст для:\n"
-            "• Авито (раздел Услуги)\n"
-            "• ВКонтакте\n"
-            "• Дром\n"
-            "• Авто.ру",
-            parse_mode='HTML'
-        )
-        return
-    
-    pub_id = args[0]
-    publication = find_publication(pub_id)
-    
-    if not publication:
-        await update.message.reply_text(f"❌ {pub_id} не найдено")
-        return
-    
-    original = publication.get('original_caption', '')
-    if not original:
-        await update.message.reply_text(f"❌ Нет текста для {pub_id}")
-        return
-    
-    # Очищаем текст
-    cleaned = remove_all_emojis(original)
-    cleaned = remove_old_contacts(cleaned)
-    cleaned = apply_price_markup(cleaned)
-    
-    # ───────────────────────────────────────────
-    # АВИТО
-    avito_text = (
-        f"🚗 Подбор и доставка автомобиля под заказ\n\n"
-        f"{cleaned}\n\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"✅ ЧТО ВКЛЮЧЕНО:\n"
-        f"• Подбор по параметрам\n"
-        f"• Проверка состояния\n"
-        f"• Оформление документов\n"
-        f"• Растаможка под ключ\n"
-        f"• Доставка в ваш город\n"
-        f"• Гарантия чистоты сделки\n\n"
-        f"📞 Telegram: t.me/{BOT_USERNAME}?start={pub_id}\n"
-        f"Менеджер: {MANAGER_LINK}\n\n"
-        f"🔑 КЛЮЧИ:\n"
-        f"авто под заказ, пригон автомобиля, авто из кореи, авто из японии, "
-        f"подбор автомобиля, доставка авто, растаможка, импорт авто"
-    )
-    
-    # ───────────────────────────────────────────
-    # ВК
-    vk_text = (
-        f"🚗 Подбор и доставка автомобилей\n\n"
-        f"{cleaned}\n\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"💼 ProAuto — подбор авто по России и СНГ\n\n"
-        f"✅ Прозрачные цены\n"
-        f"✅ Юридическое сопровождение\n"
-        f"✅ Доставка в любой город\n"
-        f"✅ Гарантия\n\n"
-        f"📞 Telegram: t.me/{BOT_USERNAME}?start={pub_id}\n\n"
-        f"#авто #автомобиль #автоподзаказ #пригонавто #авточастно"
-    )
-    
-    # ───────────────────────────────────────────
-    # ДРОМ
-    drom_text = (
-        f"Услуга подбора и доставки автомобиля\n\n"
-        f"{cleaned}\n\n"
-        f"Поможем с подбором:\n"
-        f"✅ Из Кореи, Японии, Германии, Китая, США\n"
-        f"✅ Доставка по РФ\n"
-        f"✅ Растаможка\n"
-        f"✅ Юр. оформление\n\n"
-        f"Telegram: t.me/{BOT_USERNAME}?start={pub_id}\n"
-        f"Менеджер: {MANAGER_LINK}"
-    )
-    
-    # Отправляем текстом (не превышает лимит)
-    message_text = (
-        f"📤 <b>ЭКСПОРТ {pub_id}</b>\n\n"
-        f"Выбери площадку ниже и скопируй текст:\n\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"🟢 АВИТО:\n"
-        f"<code>{avito_text[:500]}...</code>\n\n"
-        f"🟦 ВКОНТАКТЕ:\n"
-        f"<code>{vk_text[:500]}...</code>\n\n"
-        f"🟡 ДРОМ:\n"
-        f"<code>{drom_text[:500]}...</code>"
-    )
-    
-    await update.message.reply_text(message_text, parse_mode='HTML')
-    
-    # Отправляем полные тексты в отдельных сообщениях
-    await update.message.reply_text(
-        f"🟢 <b>АВИТО (полный текст):</b>\n\n<code>{avito_text}</code>",
-        parse_mode='HTML'
-    )
-    
-    await update.message.reply_text(
-        f"🟦 <b>ВКОНТАКТЕ (полный текст):</b>\n\n<code>{vk_text}</code>",
-        parse_mode='HTML'
-    )
-    
-    await update.message.reply_text(
-        f"🟡 <b>ДРОМ (полный текст):</b>\n\n<code>{drom_text}</code>",
-        parse_mode='HTML'
-    )
-
-# ════════════════════════════════════════════════════════════════════
-# ГЛАВНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ
-# ════════════════════════════════════════════════════════════════════
-
-async def handle_message(update, context):
-    """Обработка всех текстовых сообщений и фото"""
-    try:
-        message = update.message
-        if not message:
-            return
-        
-        user_id = message.from_user.id
-        has_rights = has_publish_rights(user_id)
-        text = message.text or message.caption or ""
-        
-        logger.info(f"📨 От {user_id} (права: {has_rights})")
-        
-        # ───────────────────────────────────────────
-        # ВЛАДЕЛЕЦ / МЕНЕДЖЕР
-        if has_rights:
-            source_info = extract_forward_source(message)
-            
-            # Проверяем есть ли ID публикации в тексте
-            existing_id = extract_pub_id_from_text(text)
-            
-            if existing_id:
-                # Ищем оригинал
-                publication = find_publication(existing_id)
-                if publication:
-                    source_link = publication.get('source_link', 'нет')
-                    source_name = publication.get('source_username', 'неизвестно')
-                    response = (
-                        f"🔗 <b>{existing_id}</b>\n\n"
-                        f"Источник: <code>{source_name}</code>\n\n"
-                        f"<b>Оригинал:</b>\n{source_link}"
-                    )
-                    await message.reply_text(response, parse_mode='HTML')
-                else:
-                    await message.reply_text(f"❌ {existing_id} не найдено")
-                return
-            
-            # Если переслано из канала/группы
-            if source_info['is_forwarded']:
-                username = source_info['source_chat_username']
-                logger.info(f"📍 От @{username or 'приватная группа'}")
-                
-                # Обработка как объявление
-                await handle_announcement(update, context, source_info)
-            
-            # Или свой текст с фото
-            elif message.photo:
-                logger.info(f"📷 Свой текст с фото")
-                await handle_announcement(update, context, None)
-            
-            # Иначе - информация
-            else:
-                await message.reply_text(
-                    "ℹ️ <b>Что я умею:</b>\n\n"
-                    "📤 Пересылай объявления → публикую\n"
-                    "📸 Отправляй фото + текст → публикую\n"
-                    "🔎 Пересылай пост с id_XXXX → ищу оригинал\n\n"
-                    "<b>Команды:</b>\n"
-                    "/stats — статистика\n"
-                    "/leads — заявки\n"
-                    "/export id_XXXX — текст для площадок",
-                    parse_mode='HTML'
-                )
-        
-        # ───────────────────────────────────────────
-        # КЛИЕНТ
-        else:
-            state = get_user_state(user_id)
-            
-            # Если уже в брифе - игнорируем (обработка только через кнопки)
-            if state.get('step'):
-                await message.reply_text(
-                    "ℹ️ Используйте кнопки выше для продолжения опроса"
-                )
-                return
-            
-            # Запускаем общий бриф
-            await start_general_brief(update, context)
-    
-    except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-
-# ════════════════════════════════════════════════════════════════════
-# ОЧИСТКА СТАРЫХ ДАННЫХ
-# ════════════════════════════════════════════════════════════════════
-
-def cleanup_old_publications():
-    """Архивирует публикации старше 30 дней"""
-    db = load_db(PUBLICATIONS_DB, {'counter': 0, 'publications': {}})
-    now = datetime.now()
-    cleaned = 0
-    
-    for pub_id, pub in list(db['publications'].items()):
-        try:
-            expires = datetime.fromisoformat(pub.get('expires_at', ''))
-            if now > expires and not pub.get('archived'):
-                db['publications'][pub_id] = {
-                    'source_link': pub.get('source_link'),
-                    'source_username': pub.get('source_username'),
-                    'archived': True,
-                    'archived_at': now.isoformat()
-                }
-                cleaned += 1
-        except:
-            pass
-    
-    if cleaned > 0:
-        save_db(PUBLICATIONS_DB, db)
-        logger.info(f"🧹 Архивировано {cleaned} старых публикаций")
-        # ════════════════════════════════════════════════════════════════════
-# ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
-# ════════════════════════════════════════════════════════════════════
-
-async def post_init(application):
-    """Действия при старте бота"""
-    cleanup_old_publications()
-    
-    logger.info(f"\n{'='*70}")
-    logger.info(f"🚀 PROAUTO BOT v10 - ЗАПУСК")
-    logger.info(f"{'='*70}")
-    logger.info(f"BOT: @{BOT_USERNAME}")
-    logger.info(f"Владелец: {OWNER_ID}")
-    logger.info(f"Менеджер: {MANAGER_USER_ID}")
-    logger.info(f"Группа: {TARGET_CHANNEL_NAME}")
-    logger.info(f"Менеджер ссылка: {MANAGER_LINK}")
-    logger.info(f"{'='*70}")
-    logger.info(f"\n💰 ЛЕСТНИЦА НАЦЕНОК:")
-    logger.info(f"  < 5 млн: +40,000₽")
-    logger.info(f"  5-7 млн: +80,000₽")
-    logger.info(f"  7-10 млн: +100,000₽")
-    logger.info(f"  10-15 млн: +180,000₽")
-    logger.info(f"  15-20 млн: +250,000₽")
-    logger.info(f"  20-25 млн: +350,000₽")
-    logger.info(f"  25-30 млн: +500,000₽")
-    logger.info(f"  30+ млн: +1,000,000₽")
-    logger.info(f"  EUR/USD: +1,000")
-    logger.info(f"\n{'='*70}")
-    
-    # Проверяем БД авто
-    if CAR_DATABASE:
-        brands_count = len(CAR_DATABASE)
-        logger.info(f"📚 БД Автомобилей загружена: {brands_count} марок")
+            f"🚀 <b>PROAUTO BOT — Панель</b>\n\n"
+            f"• Пересылай объявления → публикую в {TARGET_CHANNEL_NAME}\n"
+            f"• /stats — статистика\n• /leads — заявки",
+            parse_mode='HTML')
     else:
-        logger.warning(f"⚠️ БД Автомобилей НЕ загружена! Используем встроенные данные.")
-    
-    logger.info(f"✅ БОТ ГОТОВ К РАБОТЕ\n")
+        kb = [[InlineKeyboardButton("🏎️ Подобрать автомобиль", callback_data="custom")],
+              [InlineKeyboardButton("✍️ Консультация",          callback_data="consult")]]
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=("Здравствуйте! 👋\n\nЯ представляю <b>ProAuto</b> — профессиональный подбор "
+                  "и доставка автомобилей по всей России и СНГ.\n\n"
+                  "<b>Наши преимущества:</b>\n"
+                  "• ✅ Прозрачные цены без скрытых платежей\n"
+                  "• 🚗 Подбор авто под любой бюджет\n"
+                  "• 📦 Доставка во все города РФ\n"
+                  "• 📋 Полное юридическое сопровождение\n"
+                  "• 🛡 Гарантия качества\n\n"
+                  "<b>Что Вас интересует?</b>"),
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-def run_health_server():
-    """HTTP сервер на PORT=3000 для bothost.ru агента"""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
+async def cmd_stats(update, context):
+    if not has_rights(update.effective_user.id):
+        return
+    p = load_db(PUBLICATIONS_DB, {'counter':0,'publications':{}})
+    l = load_db(LEADS_DB, {'counter':0,'leads':{}})
+    await update.message.reply_text(
+        f"📊 <b>СТАТИСТИКА</b>\n\n"
+        f"📢 Публикаций: {p.get('counter',0)}\n"
+        f"📋 Заявок: {l.get('counter',0)}",
+        parse_mode='HTML')
 
-    class HealthHandler(BaseHTTPRequestHandler):
+async def cmd_leads(update, context):
+    if not has_rights(update.effective_user.id):
+        return
+    db = load_db(LEADS_DB, {'counter':0,'leads':{}})
+    if not db['leads']:
+        await update.message.reply_text("📋 Заявок пока нет"); return
+    items = sorted(db['leads'].items(), key=lambda x: x[1].get('created_at',''), reverse=True)[:10]
+    text = f"📋 <b>ПОСЛЕДНИЕ {len(items)} ЗАЯВОК</b>\n\n"
+    for lid, l in items:
+        text += f"<b>{lid}</b> — @{l.get('username','?')} ({l.get('first_name','')})\n"
+        if l.get('brand'): text += f"  🚗 {l['brand']} {l.get('model','')}\n"
+        if l.get('pub_id'): text += f"  📌 {l.get('car_name','')[:40]}\n"
+        if l.get('city'):  text += f"  🏙 {l['city']}\n"
+        text += "━━━━━━━━\n"
+    if len(text)>4000: text = text[:3950]+"..."
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def handle_msg(update, context):
+    try:
+        msg = update.message
+        if not msg: return
+        uid = msg.from_user.id
+        text = msg.text or msg.caption or ""
+
+        if has_rights(uid):
+            src = fwd_source(msg)
+            eid = re.search(r'id_(\d{4})', text)
+            if eid:
+                pid = f"id_{eid.group(1)}"
+                pub = find_pub(pid)
+                if pub:
+                    await msg.reply_text(
+                        f"🔗 <b>{pid}</b>\n\n"
+                        f"Источник: {pub.get('source_username','?')}\n"
+                        f"{pub.get('source_link','нет')}",
+                        parse_mode='HTML')
+                else:
+                    await msg.reply_text(f"❌ {pid} не найдено")
+                return
+            if src.get('is_forwarded') or msg.photo or msg.video:
+                await publish(update, context, src if src.get('is_forwarded') else None)
+            else:
+                await msg.reply_text(
+                    "ℹ️ Пересылай объявления\n/stats — статистика\n/leads — заявки")
+        else:
+            st = get_state(uid)
+            if st.get('step'):
+                await msg.reply_text("ℹ️ Используйте кнопки выше")
+                return
+            await cmd_start(update, context)
+    except Exception as e:
+        logger.error(f"handle_msg: {e}")
+
+# ════════════════════════════════════════════════
+# HEALTH SERVER + ЗАПУСК
+# ════════════════════════════════════════════════
+def health_server():
+    class H(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Type','application/json')
             self.end_headers()
-            self.wfile.write(b'{"status":"ok","bot":"ProAuto"}')
+            self.wfile.write(b'{"status":"ok"}')
         def do_HEAD(self):
-            self.send_response(200)
-            self.end_headers()
-        def log_message(self, *args):
-            pass
-
-    port = int(os.getenv('PORT', 3000))
+            self.send_response(200); self.end_headers()
+        def log_message(self,*a): pass
     try:
-        server = HTTPServer(('0.0.0.0', port), HealthHandler)
-        print(f"🌐 Health server PORT={port} OK", flush=True)
-        server.serve_forever()
+        s = HTTPServer(('0.0.0.0', PORT), H)
+        print(f"🌐 Health server PORT={PORT}", flush=True)
+        s.serve_forever()
     except Exception as e:
-        print(f"Health server error: {e}", flush=True)
+        print(f"health error: {e}", flush=True)
 
+async def on_start(app):
+    print("✅ Bot polling started!", flush=True)
+    logger.info(f"🚀 PROAUTO BOT — @{BOT_USERNAME}")
+    logger.info(f"OWNER={OWNER_ID} | GROUP={TARGET_CHANNEL_NAME}")
+    logger.info(f"DATA_DIR={DATA_DIR}")
 
 def main():
-    """Запуск бота"""
-    import threading
+    print("--- main() ---", flush=True)
 
-    print("--- main() start ---", flush=True)
+    # Health server
+    threading.Thread(target=health_server, daemon=True).start()
+    print("--- health thread OK ---", flush=True)
 
-    # 1. Стартуем health server (нужен для bothost.ru)
-    t = threading.Thread(target=run_health_server, daemon=True)
-    t.start()
-    print("--- health thread started ---", flush=True)
-
-    # 2. Проверяем токен
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN не задан!", flush=True)
-        import time; time.sleep(9999)  # Держим процесс живым
-        return
+        print("❌ BOT_TOKEN ПУСТ", flush=True)
+        import time; time.sleep(99999)
 
-    print(f"--- BOT_TOKEN OK ({BOT_TOKEN[:10]}...) ---", flush=True)
-    print(f"--- DATA_DIR={DATA_DIR} ---", flush=True)
-    print(f"--- OWNER_ID={OWNER_ID} ---", flush=True)
+    print(f"--- token: {BOT_TOKEN[:10]}... ---", flush=True)
 
-    # 3. Строим приложение
-    try:
-        app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-        print("--- Application built OK ---", flush=True)
-    except Exception as e:
-        print(f"❌ Ошибка создания Application: {e}", flush=True)
-        import traceback; traceback.print_exc()
-        import time; time.sleep(9999)
-        return
-
-    # 4. Регистрируем хендлеры
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("leads", leads_command))
-    app.add_handler(CommandHandler("export", export_command))
+    app = Application.builder().token(BOT_TOKEN).post_init(on_start).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("leads", cmd_leads))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(
         filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
-        handle_message
-    ))
-    print("--- Handlers registered ---", flush=True)
+        handle_msg))
 
-    # 5. Запускаем polling
-    print("--- Starting polling... ---", flush=True)
-    try:
-        app.run_polling(
-            allowed_updates=['message', 'callback_query'],
-            drop_pending_updates=False,
-            poll_interval=1.0,
-            timeout=30
-        )
-        print("--- Polling stopped ---", flush=True)
-    except Exception as e:
-        print(f"❌ Polling error: {e}", flush=True)
-        import traceback; traceback.print_exc()
-        import time; time.sleep(9999)
+    print("--- run_polling() ---", flush=True)
+    app.run_polling(
+        allowed_updates=['message','callback_query'],
+        drop_pending_updates=False,
+        poll_interval=1.0,
+        timeout=30)
 
 if __name__ == '__main__':
     main()
