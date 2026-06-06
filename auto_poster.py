@@ -1,42 +1,28 @@
 """
-PROAUTO BOT v16
-"""
+PROAUTO BOT v10 - ФИНАЛЬНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ
 
-import sys
-print("=== PROAUTO BOT v16 ЗАПУСК ===", flush=True)
-print(f"Python: {sys.version}", flush=True)
+✅ Бесконечных циклов нет
+✅ ID идёт с 0004 (правильная нумерация)
+✅ ID под ценой
+✅ Удаление фраз "Пишите нам" / "Звоните"
+✅ Чистая логика брифа (specific_car и custom пути)
+✅ Всё работает без глюков
+"""
 
 import asyncio
 import re
 import json
 import os
 from datetime import datetime, timedelta
-
-print("Базовые модули OK", flush=True)
-
-try:
-    from dotenv import load_dotenv
-    print("dotenv OK", flush=True)
-except ImportError as e:
-    print(f"ОШИБКА dotenv: {e}", flush=True)
-    sys.exit(1)
-
-try:
-    from telegram import (
-        Update, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
-    )
-    from telegram.ext import (
-        Application, ContextTypes, MessageHandler, CommandHandler,
-        CallbackQueryHandler, filters
-    )
-    print("python-telegram-bot OK", flush=True)
-except ImportError as e:
-    print(f"ОШИБКА telegram: {e}", flush=True)
-    print("Установи: pip install python-telegram-bot==20.7.0", flush=True)
-    sys.exit(1)
-
+from dotenv import load_dotenv
+from telegram import (
+    Update, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
+)
+from telegram.ext import (
+    Application, ContextTypes, MessageHandler, CommandHandler,
+    CallbackQueryHandler, filters
+)
 import logging
-print("Все импорты OK", flush=True)
 
 load_dotenv()
 
@@ -57,65 +43,10 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 # Файлы БД
-# Директория для данных (bothost.ru использует /app/data)
-DATA_DIR = os.getenv('DATA_DIR', '/app/data')
-os.makedirs(DATA_DIR, exist_ok=True)  # Создаём если не существует
-
-PUBLICATIONS_DB = os.path.join(DATA_DIR, 'publications.json')
-LEADS_DB = os.path.join(DATA_DIR, 'leads.json')
-
+PUBLICATIONS_DB = 'publications.json'
+LEADS_DB = 'leads.json'
 media_groups_cache = {}
 BRIEF_STATES = {}
-
-# ════════════════════════════════════════════════════════════════════
-# ПАТТЕРН ЭМОДЗИ (нужен до всех функций обработки текста)
-# ════════════════════════════════════════════════════════════════════
-EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
-    "\U0001F780-\U0001F7FF"
-    "\U0001F800-\U0001F8FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FA6F"
-    "\U0001FA70-\U0001FAFF"
-    "\U00002700-\U000027BF"
-    "\U000024C2-\U0001F251"
-    "\U0001F1E0-\U0001F1FF"
-    "\U00002600-\U000026FF"
-    "]+",
-    flags=re.UNICODE
-)
-
-# ════════════════════════════════════════════════════════════════════
-# БРЕНДЫ И ПАТТЕРНЫ ДЛЯ ИЗВЛЕЧЕНИЯ НАЗВАНИЯ АВТО
-# ════════════════════════════════════════════════════════════════════
-_CAR_BRANDS_FOR_EXTRACT = [
-    'BMW', 'Mercedes', 'Audi', 'Toyota', 'Lexus', 'Honda', 'Nissan',
-    'Mazda', 'Kia', 'Hyundai', 'Volkswagen', 'Porsche', 'Volvo', 'Subaru',
-    'Mitsubishi', 'Infiniti', 'Geely', 'Haval', 'BYD', 'Chery', 'Lixiang',
-    'NIO', 'Zeekr', 'Tesla', 'Rolls', 'Bentley', 'Ferrari', 'Lamborghini',
-    'Land Rover', 'Range Rover', 'Ford', 'Chevrolet', 'Cadillac', 'Jeep',
-    'Genesis', 'Skoda', 'Alfa Romeo', 'Maserati', 'Jaguar', 'Peugeot',
-    'Renault', 'Suzuki', 'RR', 'Acura', 'Buick', 'Dodge', 'Lincoln',
-]
-
-_SKIP_PATTERNS_EXTRACT = [
-    r'прямая\s+продажа',
-    r'в\s+свободной\s+продаже',
-    r'авто\s+из\s+европы',
-    r'авто\s+прибыло',
-    r'авто\s+из\s+',
-    r'автомобиль\s+находится',
-    r'готова?\s+к\s+пригону',
-    r'срок\s+доставки',
-    r'авто\s+готово',
-    r'^цена\b',
-    r'^\s*[-–—]\s*$',
-    r'^\s*$',
-]
 
 # ════════════════════════════════════════════════════════════════════
 # ИМПОРТ БАЗЫ АВТО
@@ -345,136 +276,16 @@ def get_next_publication_id():
     logger.info(f"🆔 Новый ID: {new_id}")
     return new_id
 
-
-
-def extract_car_details(text):
-    """
-    Извлекает структурированные данные из текста объявления.
-    Используется для обогащения publications.json и будущего API.
-    """
-    details = {
-        'car_brand': None,
-        'car_model': None,
-        'price': None,
-        'currency': None,
-        'year': None,
-        'mileage': None,
-        'city': None,
-    }
-
-    if not text:
-        return details
-
-    clean = EMOJI_PATTERN.sub('', text)
-
-    # Бренд
-    brands_map = {
-        'BMW': 'BMW', 'Mercedes': 'Mercedes-Benz', 'Audi': 'Audi',
-        'Toyota': 'Toyota', 'Lexus': 'Lexus', 'Honda': 'Honda',
-        'Nissan': 'Nissan', 'Mazda': 'Mazda', 'Kia': 'Kia',
-        'Hyundai': 'Hyundai', 'Volkswagen': 'Volkswagen',
-        'Porsche': 'Porsche', 'Volvo': 'Volvo', 'Geely': 'Geely',
-        'Haval': 'Haval', 'BYD': 'BYD', 'Tesla': 'Tesla',
-        'Ford': 'Ford', 'Chevrolet': 'Chevrolet', 'Rolls': 'Rolls-Royce',
-        'Bentley': 'Bentley', 'Ferrari': 'Ferrari', 'Land Rover': 'Land Rover',
-        'Range Rover': 'Range Rover', 'Genesis': 'Genesis',
-    }
-    for key, brand_name in brands_map.items():
-        if key.lower() in clean.lower():
-            details['car_brand'] = brand_name
-            break
-
-    # Цена и валюта
-    price_match = re.search(
-        r'(\d[\d\s., ]*\d)\s*([₽€$]|руб)',
-        clean
-    )
-    if price_match:
-        try:
-            price_str = re.sub(r'[\s,. ]', '', price_match.group(1))
-            details['price'] = int(price_str)
-            curr = price_match.group(2)
-            details['currency'] = '₽' if curr in ['₽', 'руб'] else curr
-        except:
-            pass
-
-    # Год выпуска
-    year_match = re.search(r'\b(20[0-2]\d)\b', clean)
-    if year_match:
-        details['year'] = int(year_match.group(1))
-
-    # Пробег
-    mileage_match = re.search(
-        r'(\d[\d\s.,]*\d)\s*(?:км|km|тыс\.\s*км)',
-        clean, re.IGNORECASE
-    )
-    if mileage_match:
-        try:
-            m_str = re.sub(r'[\s,.]', '', mileage_match.group(1))
-            details['mileage'] = int(m_str)
-        except:
-            pass
-
-    # Город (из строк с "в Москве", "до Москвы" и т.д.)
-    city_match = re.search(
-        r'(?:в|до|из)\s+(Москв[еа]|Санкт-Петербург[еа]|Краснодар[еа]|Сочи|'
-        r'Екатеринбург[еа]|Новосибирск[еа]|Казан[иь])',
-        clean, re.IGNORECASE
-    )
-    if city_match:
-        details['city'] = city_match.group(1)
-
-    return details
-
 def save_publication(pub_id, **kwargs):
-    """Сохраняет публикацию с обогащёнными данными для API/сайта."""
+    """Сохраняет публикацию в БД"""
     db = load_db(PUBLICATIONS_DB, {'counter': 0, 'publications': {}})
-
-    original = kwargs.get('original_caption', '')
-    details = extract_car_details(original)
-
-    # Название авто — используем extract_car_name_from_pub через текст напрямую
-    car_name_raw = None
-    if original:
-        for line in original.split('\n'):
-            clean = EMOJI_PATTERN.sub('', line).strip()
-            clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
-            if not clean or len(clean) < 3:
-                continue
-            found = False
-            for brand in _CAR_BRANDS_FOR_EXTRACT:
-                if brand.lower() in clean.lower():
-                    name = re.sub(r'\bв\s+продаже\b|\bв\s+наличии\b', '', clean, flags=re.IGNORECASE)
-                    name = re.sub(r'[\u203c!]+', '', name).strip()
-                    if len(name) > 3:
-                        car_name_raw = name[:80]
-                        found = True
-                        break
-            if found:
-                break
-
-    pub_msg_id = kwargs.get('published_message_id')
-    channel = TARGET_CHANNEL_NAME.replace('@', '')
-    telegram_link = f"https://t.me/{channel}/{pub_msg_id}" if pub_msg_id else None
-
-    now = datetime.now()
     db['publications'][pub_id] = {
         **kwargs,
-        'pub_id': pub_id,
-        'car_brand': details.get('car_brand'),
-        'car_model': car_name_raw,
-        'price': details.get('price'),
-        'currency': details.get('currency'),
-        'year': details.get('year'),
-        'mileage': details.get('mileage'),
-        'city': details.get('city'),
-        'telegram_link': telegram_link,
-        'status': 'active',
-        'published_at': now.isoformat(),
-        'expires_at': (now + timedelta(days=30)).isoformat(),
+        'published_at': datetime.now().isoformat(),
+        'expires_at': (datetime.now() + timedelta(days=30)).isoformat()
     }
     save_db(PUBLICATIONS_DB, db)
-    logger.info(f"\U0001f4be {pub_id} | {details.get('car_brand','?')} | {details.get('price','?')}{details.get('currency','')}")
+    logger.info(f"💾 {pub_id} сохранён")
 
 def find_publication(pub_id):
     """Ищет публикацию по ID"""
@@ -500,7 +311,25 @@ def save_lead(lead_id, data):
     # ════════════════════════════════════════════════════════════════════
 # УДАЛЕНИЕ ЭМОДЗИ
 # ════════════════════════════════════════════════════════════════════
-# EMOJI_PATTERN определён выше в блоке констант
+
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "\U0001FA70-\U0001FAFF"
+    "\U00002700-\U000027BF"
+    "\U000024C2-\U0001F251"
+    "\U0001F1E0-\U0001F1FF"
+    "\U00002600-\U000026FF"
+    "]+",
+    flags=re.UNICODE
+)
 
 def remove_all_emojis(text):
     """Удаляет ВСЕ эмодзи"""
@@ -845,6 +674,7 @@ def build_footer(footer_type, pub_id=None):
 
 def generate_hashtags(text):
     """Генерирует 3-5 релевантных хэштегов на основе текста объявления"""
+    import re
     tags = set()
     
     text_lower = text.lower()
@@ -1251,18 +1081,11 @@ async def notify_manager(context, lead_id, lead_data):
     # Контакт
     # Кликабельная ссылка на клиента
     username = lead_data.get('username')
-    first_name = lead_data.get('first_name', 'Клиент')
     uid = lead_data['user_id']
-
     if username:
-        # username → ссылка которая работает везде
         text += f"\n💬 <a href='https://t.me/{username}'>Написать клиенту @{username}</a>"
     else:
-        # Нет username — используем text_mention (работает в TG через entities)
-        # Формат: упоминание через HTML без username
-        text += f"\n💬 Написать клиенту: "
-        text += f"<a href='tg://user?id={uid}'>{first_name} (нажми)</a>"
-        text += f"\n   ID для поиска: <code>{uid}</code>"
+        text += f"\n💬 <a href='tg://user?id={uid}'>Написать клиенту (ID: {uid})</a>"
     
     # Отправляем владельцу и менеджеру
     for recipient_id in [OWNER_ID, MANAGER_USER_ID]:
@@ -1664,7 +1487,8 @@ async def start_brief_for_specific_car(update, context, pub_id):
     }
     
     text = (
-        f"🚗 <b>{car_name}</b>\n\n"
+        f"🚗 <b>Видим что интересует:</b>\n\n"
+        f"{car_name} ({pub_id})\n\n"
         f"✅ Отлично! Уточним пару деталей:"
     )
     
@@ -2037,61 +1861,21 @@ async def button_callback(update, context):
 # КОМАНДА /START (DEEP LINKING)
 # ════════════════════════════════════════════════════════════════════
 
-# Бренды для умного извлечения названия авто
-    # _CAR_BRANDS_FOR_EXTRACT и _SKIP_PATTERNS_EXTRACT определены выше
-
-
-
 def extract_car_name_from_pub(pub_id):
-    """
-    Умное извлечение названия авто из оригинального текста.
-    Пропускает статусные строки, ищет строку с брендом.
-    """
+    """Извлекает название авто из сохранённой публикации"""
     pub = find_publication(pub_id)
     if not pub:
         return None
     original = pub.get('original_caption', '')
     if not original:
         return None
-
-    lines = original.split('\n')
-
-    # Приоритет 1: строка содержит известный бренд авто
-    for line in lines:
-        clean = EMOJI_PATTERN.sub('', line).strip()
-        clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
-        if not clean or len(clean) < 3:
-            continue
-        for brand in _CAR_BRANDS_FOR_EXTRACT:
-            if brand.lower() in clean.lower():
-                # Убираем статусные слова из строки
-                name = re.sub(
-                    r'\bв\s+продаже\b|\bв\s+наличии\b|\bпродаю\b',
-                    '', clean, flags=re.IGNORECASE
-                )
-                name = re.sub(r'[‼!🔥]+', '', name).strip()
-                if len(name) > 3:
-                    logger.info(f"   🚗 Бренд найден: [{name[:60]}]")
-                    return name[:80]
-
-    # Приоритет 2: первая нормальная строка без цены и двоеточий
-    for line in lines:
-        clean = EMOJI_PATTERN.sub('', line).strip()
-        clean = re.sub(r'^[-–—•*]\s*', '', clean).strip()
-        if not clean or len(clean) < 6 or len(clean) > 100:
-            continue
-        skip = any(
-            re.search(p, clean, re.IGNORECASE)
-            for p in _SKIP_PATTERNS_EXTRACT
-        )
-        if skip:
-            continue
-        if (not re.search(r'[₽€$]|\d{4,}', clean) and
-                ':' not in clean and
-                clean[0].isupper()):
-            logger.info(f"   🚗 Название (fallback): [{clean[:60]}]")
-            return clean[:80]
-
+    # Берём первую непустую строку без буллетов
+    for line in original.split('\n'):
+        s = line.strip()
+        s = re.sub(r'^[-–—•]\s*', '', s)
+        s = s.strip()
+        if s and len(s) > 3 and len(s) < 120:
+            return s
     return None
 
 
@@ -2118,16 +1902,13 @@ async def start_command(update, context):
                 'interest_type': 'specific_car'
             }
 
-            # Ограничиваем длину названия в кнопке
-            btn_car_name = car_name[:45] if car_name else 'этот автомобиль'
-
             keyboard = [
                 [InlineKeyboardButton(
-                    f"✅ {btn_car_name}",
+                    f"🏎️ Интересует: {car_name[:40]}",
                     callback_data=f"brief_yes_{pub_id}"
                 )],
                 [InlineKeyboardButton(
-                    "🏎️ Другой автомобиль",
+                    "🔍 Другой автомобиль",
                     callback_data="brief_custom"
                 )],
                 [InlineKeyboardButton(
@@ -2140,7 +1921,8 @@ async def start_command(update, context):
                 chat_id=update.effective_chat.id,
                 text=(
                     f"Здравствуйте! 👋\n\n"
-                    f"Большое спасибо за Ваше обращение!\n"
+                    f"Видим что интересует:\n"
+                    f"<b>{car_name}</b>\n\n"
                     f"Что Вас интересует?"
                 ),
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -2551,88 +2333,41 @@ async def post_init(application):
     
     logger.info(f"✅ БОТ ГОТОВ К РАБОТЕ\n")
 
-def run_health_server():
-    """HTTP сервер на PORT=3000 для bothost.ru агента"""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok","bot":"ProAuto"}')
-        def do_HEAD(self):
-            self.send_response(200)
-            self.end_headers()
-        def log_message(self, *args):
-            pass
-
-    port = int(os.getenv('PORT', 3000))
-    try:
-        server = HTTPServer(('0.0.0.0', port), HealthHandler)
-        print(f"🌐 Health server PORT={port} OK", flush=True)
-        server.serve_forever()
-    except Exception as e:
-        print(f"Health server error: {e}", flush=True)
-
-
 def main():
-    """Запуск бота"""
-    import threading
-
-    print("--- main() start ---", flush=True)
-
-    # 1. Стартуем health server (нужен для bothost.ru)
-    t = threading.Thread(target=run_health_server, daemon=True)
-    t.start()
-    print("--- health thread started ---", flush=True)
-
-    # 2. Проверяем токен
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN не задан!", flush=True)
-        import time; time.sleep(9999)  # Держим процесс живым
-        return
-
-    print(f"--- BOT_TOKEN OK ({BOT_TOKEN[:10]}...) ---", flush=True)
-    print(f"--- DATA_DIR={DATA_DIR} ---", flush=True)
-    print(f"--- OWNER_ID={OWNER_ID} ---", flush=True)
-
-    # 3. Строим приложение
+    """Главная функция запуска бота"""
     try:
         app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-        print("--- Application built OK ---", flush=True)
-    except Exception as e:
-        print(f"❌ Ошибка создания Application: {e}", flush=True)
-        import traceback; traceback.print_exc()
-        import time; time.sleep(9999)
-        return
-
-    # 4. Регистрируем хендлеры
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("leads", leads_command))
-    app.add_handler(CommandHandler("export", export_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(
-        filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
-        handle_message
-    ))
-    print("--- Handlers registered ---", flush=True)
-
-    # 5. Запускаем polling
-    print("--- Starting polling... ---", flush=True)
-    try:
+        
+        # Регистрируем команды
+        app.add_handler(CommandHandler("start", start_command))
+        app.add_handler(CommandHandler("stats", stats_command))
+        app.add_handler(CommandHandler("leads", leads_command))
+        app.add_handler(CommandHandler("export", export_command))
+        
+        # Обработчик кнопок (callback)
+        app.add_handler(CallbackQueryHandler(button_callback))
+        
+        # Обработчик всех остальных сообщений (текст, фото, видео)
+        app.add_handler(MessageHandler(
+            filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
+            handle_message
+        ))
+        
+        logger.info("🔗 Все обработчики подключены")
+        logger.info("⏳ Запуск polling...\n")
+        
+        # Запуск polling
         app.run_polling(
             allowed_updates=['message', 'callback_query'],
-            drop_pending_updates=False,
+            drop_pending_updates=True,
             poll_interval=1.0,
             timeout=30
         )
-        print("--- Polling stopped ---", flush=True)
+    
     except Exception as e:
-        print(f"❌ Polling error: {e}", flush=True)
-        import traceback; traceback.print_exc()
-        import time; time.sleep(9999)
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     main()
