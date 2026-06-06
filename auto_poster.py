@@ -1,28 +1,42 @@
 """
-PROAUTO BOT v10 - ФИНАЛЬНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ
-
-✅ Бесконечных циклов нет
-✅ ID идёт с 0004 (правильная нумерация)
-✅ ID под ценой
-✅ Удаление фраз "Пишите нам" / "Звоните"
-✅ Чистая логика брифа (specific_car и custom пути)
-✅ Всё работает без глюков
+PROAUTO BOT v16
 """
+
+import sys
+print("=== PROAUTO BOT v16 ЗАПУСК ===", flush=True)
+print(f"Python: {sys.version}", flush=True)
 
 import asyncio
 import re
 import json
 import os
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
-from telegram import (
-    Update, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
-)
-from telegram.ext import (
-    Application, ContextTypes, MessageHandler, CommandHandler,
-    CallbackQueryHandler, filters
-)
+
+print("Базовые модули OK", flush=True)
+
+try:
+    from dotenv import load_dotenv
+    print("dotenv OK", flush=True)
+except ImportError as e:
+    print(f"ОШИБКА dotenv: {e}", flush=True)
+    sys.exit(1)
+
+try:
+    from telegram import (
+        Update, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
+    )
+    from telegram.ext import (
+        Application, ContextTypes, MessageHandler, CommandHandler,
+        CallbackQueryHandler, filters
+    )
+    print("python-telegram-bot OK", flush=True)
+except ImportError as e:
+    print(f"ОШИБКА telegram: {e}", flush=True)
+    print("Установи: pip install python-telegram-bot==20.7.0", flush=True)
+    sys.exit(1)
+
 import logging
+print("Все импорты OK", flush=True)
 
 load_dotenv()
 
