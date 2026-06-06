@@ -2546,9 +2546,50 @@ async def post_init(application):
     
     logger.info(f"✅ БОТ ГОТОВ К РАБОТЕ\n")
 
+def run_health_server():
+    """
+    Запускает HTTP сервер на PORT (по умолчанию 3000).
+    bothost.ru требует чтобы процесс слушал этот порт —
+    иначе агент пишет 'Operation timed out'.
+    """
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","bot":"ProAuto v16"}')
+
+        def do_HEAD(self):
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass  # Тихий режим — не засоряем логи
+
+    port = int(os.getenv('PORT', 3000))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    print(f"✅ Health server запущен на порту {port}", flush=True)
+    logger.info(f"🌐 Health server: http://0.0.0.0:{port}")
+    server.serve_forever()
+
+
 def main():
     """Главная функция запуска бота"""
     try:
+        import threading
+
+        # Запускаем HTTP health server в фоновом потоке
+        # (bothost.ru требует ответа на PORT=3000)
+        health_thread = threading.Thread(
+            target=run_health_server,
+            daemon=True,
+            name="HealthServer"
+        )
+        health_thread.start()
+
         app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
         
         # Регистрируем команды
