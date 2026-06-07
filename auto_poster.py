@@ -70,8 +70,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-media_cache  = {}
-BRIEF_STATES = {}
+media_cache   = {}
+BRIEF_STATES  = {}
+RELAY_SESSIONS = {}   # {manager_id: client_id} — активные диалоги менеджер↔клиент
 
 print(f"BOT_TOKEN: {'OK' if BOT_TOKEN else '❌ НЕТ!'}", flush=True)
 print(f"OWNER_ID: {OWNER_ID}", flush=True)
@@ -1285,6 +1286,114 @@ async def button_cb(update, context):
 # КОМАНДЫ
 # ════════════════════════════════════════════════════════════
 
+async def cmd_msg(update, context):
+    """
+    /msg USER_ID текст сообщения
+    Отправить сообщение клиенту без username через бота.
+    Пример: /msg 7631042064 Здравствуйте, ваша заявка принята!
+    """
+    if not has_rights(update.effective_user.id):
+        return
+
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "📤 <b>Отправка сообщения клиенту</b>\n\n"
+            "Использование:\n"
+            "<code>/msg USER_ID текст сообщения</code>\n\n"
+            "Пример:\n"
+            "<code>/msg 7631042064 Здравствуйте! Ваша заявка на BMW Z4 принята. "
+            "Когда вам удобно созвониться?</code>\n\n"
+            "После отправки клиент ответит боту, "
+            "и его ответ придёт вам сюда.",
+            parse_mode='HTML'
+        )
+        return
+
+    try:
+        client_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ USER_ID должен быть числом")
+        return
+
+    message_text = ' '.join(args[1:])
+    manager_id   = update.effective_user.id
+
+    # Оборачиваем в красивый блок от ProAuto
+    outgoing = (
+        f"📩 <b>Сообщение от менеджера ProAuto:</b>\n\n"
+        f"{message_text}\n\n"
+        f"─────────────────\n"
+        f"💬 Чтобы ответить — просто напишите в этот чат."
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=client_id,
+            text=outgoing,
+            parse_mode='HTML'
+        )
+        # Запоминаем активный диалог
+        RELAY_SESSIONS[client_id] = manager_id
+        RELAY_SESSIONS[manager_id] = client_id
+
+        await update.message.reply_text(
+            f"✅ <b>Сообщение доставлено клиенту</b> (ID: <code>{client_id}</code>)\n\n"
+            f"Когда клиент ответит — его ответ придёт вам сюда автоматически.\n\n"
+            f"Чтобы завершить диалог: /endchat",
+            parse_mode='HTML'
+        )
+        logger.info(f"📤 Менеджер {manager_id} написал клиенту {client_id}")
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ <b>Не удалось отправить сообщение</b>\n\n"
+            f"Причина: {str(e)}\n\n"
+            f"Возможные причины:\n"
+            f"• Клиент заблокировал бота\n"
+            f"• Клиент ещё не писал боту\n"
+            f"• Неверный ID\n\n"
+            f"💡 Попросите клиента написать /start в боте.",
+            parse_mode='HTML'
+        )
+
+
+async def cmd_endchat(update, context):
+    """Завершить активный диалог с клиентом"""
+    if not has_rights(update.effective_user.id):
+        return
+    manager_id = update.effective_user.id
+    client_id  = RELAY_SESSIONS.pop(manager_id, None)
+    if client_id:
+        RELAY_SESSIONS.pop(client_id, None)
+        await update.message.reply_text(
+            f"✅ Диалог с клиентом <code>{client_id}</code> завершён.",
+            parse_mode='HTML')
+    else:
+        await update.message.reply_text("ℹ️ Нет активных диалогов.")
+
+
+async def cmd_chats(update, context):
+    """Показать активные диалоги"""
+    if not has_rights(update.effective_user.id):
+        return
+    manager_id = update.effective_user.id
+    active = {k:v for k,v in RELAY_SESSIONS.items()
+              if k == manager_id or v == manager_id}
+    if not active:
+        await update.message.reply_text("ℹ️ Нет активных диалогов с клиентами.")
+        return
+    txt = "💬 <b>Активные диалоги:</b>\n"
+    seen = set()
+    for k,v in active.items():
+        pair = tuple(sorted([k,v]))
+        if pair in seen: continue
+        seen.add(pair)
+        client_id = v if k == manager_id else k
+        txt += f"• Клиент ID: <code>{client_id}</code>\n"
+    txt += "\n/endchat — завершить диалог"
+    await update.message.reply_text(txt, parse_mode='HTML')
+
+
 async def cmd_start(update, context):
     uid  = update.effective_user.id
     args = context.args
@@ -1484,15 +1593,57 @@ async def handle_msg(update, context):
                 await publish(update, context,
                               info if info.get('is_forwarded') else None)
             else:
-                await msg.reply_text(
-                    "ℹ️ Пересылай объявления → публикую\n"
-                    "/stats | /leads | /export id_XXXX")
+                # ── RELAY: менеджер отвечает клиенту ──
+                if uid in RELAY_SESSIONS and text and not text.startswith('/'):
+                    client_id = RELAY_SESSIONS[uid]
+                    outgoing = (
+                        f"📩 <b>Сообщение от менеджера ProAuto:</b>\n\n"
+                        f"{text}\n\n"
+                        f"─────────────────\n"
+                        f"💬 Чтобы ответить — просто напишите в этот чат."
+                    )
+                    try:
+                        await context.bot.send_message(
+                            chat_id=client_id,
+                            text=outgoing,
+                            parse_mode='HTML'
+                        )
+                        await msg.reply_text(
+                            f"✅ Доставлено клиенту <code>{client_id}</code>",
+                            parse_mode='HTML')
+                        logger.info(f"🔄 Relay: менеджер {uid} → клиент {client_id}")
+                    except Exception as e:
+                        await msg.reply_text(f"❌ Не доставлено: {e}")
+                else:
+                    await msg.reply_text(
+                        "ℹ️ Пересылай объявления → публикую\n"
+                        "/stats | /leads | /export id_XXXX | /msg USER_ID текст")
         else:
+            # ── RELAY: клиент отвечает в активном диалоге ──
+            if uid in RELAY_SESSIONS:
+                manager_id = RELAY_SESSIONS[uid]
+                reply_text = (
+                    f"💬 <b>Ответ клиента</b> "
+                    f"(ID: <code>{uid}</code>):\n\n"
+                    f"{text}"
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=manager_id,
+                        text=reply_text,
+                        parse_mode='HTML'
+                    )
+                    logger.info(f"🔄 Relay: клиент {uid} → менеджер {manager_id}")
+                except Exception as e:
+                    logger.error(f"relay error: {e}")
+                return
+
             st = get_state(uid)
             if st.get('step'):
                 await msg.reply_text("ℹ️ Используйте кнопки выше")
                 return
             await cmd_start(update, context)
+
     except Exception as e:
         logger.error(f"handle_msg: {e}")
         import traceback; logger.error(traceback.format_exc())
@@ -1553,10 +1704,13 @@ def main():
         import traceback; traceback.print_exc()
         import time; time.sleep(99999)
 
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("stats",  cmd_stats))
-    app.add_handler(CommandHandler("leads",  cmd_leads))
-    app.add_handler(CommandHandler("export", cmd_export))
+    app.add_handler(CommandHandler("start",   cmd_start))
+    app.add_handler(CommandHandler("stats",   cmd_stats))
+    app.add_handler(CommandHandler("leads",   cmd_leads))
+    app.add_handler(CommandHandler("export",  cmd_export))
+    app.add_handler(CommandHandler("msg",     cmd_msg))
+    app.add_handler(CommandHandler("endchat", cmd_endchat))
+    app.add_handler(CommandHandler("chats",   cmd_chats))
     app.add_handler(CallbackQueryHandler(button_cb))
     app.add_handler(MessageHandler(
         filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
