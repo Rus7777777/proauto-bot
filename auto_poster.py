@@ -1663,18 +1663,14 @@ async def handle_msg(update, context):
             # ── RELAY: клиент отвечает в активном диалоге ──
             if uid in RELAY_SESSIONS:
                 manager_id = RELAY_SESSIONS[uid]
-                reply_text = (
-                    f"💬 <b>Ответ клиента</b> "
-                    f"(ID: <code>{uid}</code>):\n\n"
-                    f"{text}"
-                )
                 try:
-                    await context.bot.send_message(
+                    # forward_message: заголовок "Переслано от [Имя]" — кликабелен!
+                    await context.bot.forward_message(
                         chat_id=manager_id,
-                        text=reply_text,
-                        parse_mode='HTML'
+                        from_chat_id=msg.chat_id,
+                        message_id=msg.message_id
                     )
-                    logger.info(f"🔄 Relay: клиент {uid} → менеджер {manager_id}")
+                    logger.info(f"🔄 Relay forward: клиент {uid} → менеджер {manager_id}")
                 except Exception as e:
                     logger.error(f"relay error: {e}")
                 return
@@ -1683,6 +1679,29 @@ async def handle_msg(update, context):
             if st.get('step'):
                 await msg.reply_text("ℹ️ Используйте кнопки выше")
                 return
+
+            # Уведомляем менеджера о новом обращении —
+            # forward даёт кликабельный заголовок "Переслано от [Имя]"
+            for rid in [OWNER_ID, MANAGER_USER_ID]:
+                if rid and rid != uid:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=rid,
+                            text=(
+                                f"👋 <b>Новое обращение в бот</b>\n"
+                                f"Нажмите на имя в пересланном сообщении ниже "
+                                f"чтобы открыть профиль:"
+                            ),
+                            parse_mode='HTML'
+                        )
+                        await context.bot.forward_message(
+                            chat_id=rid,
+                            from_chat_id=msg.chat_id,
+                            message_id=msg.message_id
+                        )
+                    except Exception as e:
+                        logger.error(f"notify new user: {e}")
+
             await cmd_start(update, context)
 
     except Exception as e:
