@@ -942,15 +942,33 @@ async def _album(mgid, context):
 # ════════════════════════════════════════════════════════════
 
 async def notify_manager(context, lid, data):
+    """
+    Уведомление менеджеру о новой заявке.
+    Ссылка на клиента:
+      - Есть username → https://t.me/username  (работает везде)
+      - Нет username  → tg://user?id=ID        (работает в TG-приложении,
+                                                 бот должен знать этого пользователя)
+    """
     uid = data['user_id']
     un  = data.get('username')
-    fn  = data.get('first_name','Клиент')
+    fn  = data.get('first_name') or 'Клиент'
+    ln  = data.get('last_name') or ''
+    full_name = f"{fn} {ln}".strip()
 
     text = f"🆕 <b>ЗАЯВКА {lid}</b>\n\n"
-    if un: text += f"👤 @{un} ({fn})\n"
-    else:  text += f"👤 {fn}\n"
-    text += f"🆔 <code>{uid}</code>\n\n"
 
+    # ── Данные клиента ──────────────────────────────────────
+    if un:
+        # username есть — простая ссылка
+        text += f"👤 <a href='https://t.me/{un}'>@{un}</a> ({full_name})\n"
+    else:
+        # username нет — text mention через tg://
+        # Telegram откроет профиль при клике в приложении
+        text += f"👤 <a href='tg://user?id={uid}'>{full_name}</a>\n"
+
+    text += f"🆔 ID: <code>{uid}</code>\n\n"
+
+    # ── Тип заявки ─────────────────────────────────────────
     itype = data.get('interest_type','')
     if itype == 'consultation':
         text += "✍️ <b>Запрос консультации</b>\n\n"
@@ -960,20 +978,28 @@ async def notify_manager(context, lid, data):
     else:
         text += "<b>Параметры заказа:</b>\n"
 
-    for k,l in [('brand','Марка'),('model','Модель'),('generation','Поколение'),
-                ('city','Город'),('timing','Срок')]:
-        if data.get(k): text += f"• {l}: {data[k]}\n"
+    for k, label in [('brand','Марка'), ('model','Модель'),
+                     ('generation','Поколение'), ('city','Город'),
+                     ('timing','Срок')]:
+        if data.get(k):
+            text += f"• {label}: {data[k]}\n"
 
+    # ── Кнопка «Написать клиенту» ──────────────────────────
+    text += "\n"
     if un:
-        text += f"\n💬 <a href='https://t.me/{un}'>Написать @{un}</a>"
+        text += f"💬 <a href='https://t.me/{un}'>Написать клиенту @{un}</a>"
     else:
-        text += f"\n💬 <a href='tg://user?id={uid}'>{fn} — нажми</a>"
-        text += f"\n   ID: <code>{uid}</code>"
+        text += f"💬 <a href='tg://user?id={uid}'>Написать клиенту {full_name}</a>"
+        text += f"\n⚠️ Если ссылка не открылась — найди в TG по ID: <code>{uid}</code>"
 
+    # ── Отправляем владельцу и менеджеру ───────────────────
     for rid in [OWNER_ID, MANAGER_USER_ID]:
         if rid:
-            try: await context.bot.send_message(chat_id=rid, text=text, parse_mode='HTML')
-            except Exception as e: logger.error(f"notify {rid}: {e}")
+            try:
+                await context.bot.send_message(
+                    chat_id=rid, text=text, parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"notify {rid}: {e}")
 
 # ════════════════════════════════════════════════════════════
 # БРИФ — ФИНАЛИЗАЦИЯ
