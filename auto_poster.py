@@ -985,20 +985,32 @@ async def notify_manager(context, lid, data):
         if data.get(k):
             text += f"• {label}: {data[k]}\n"
 
-    # ── Кнопка «Написать клиенту» ──────────────────────────
-    text += "\n"
+    # ── Кнопки для менеджера ───────────────────────────────
+    # Если есть username — кнопка открывает чат напрямую
+    # Если нет — кнопка запускает relay через бота
     if un:
-        text += f"💬 <a href='https://t.me/{un}'>Написать клиенту @{un}</a>"
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "💬 Написать клиенту",
+                url=f"https://t.me/{un}"
+            )
+        ]])
     else:
-        text += f"💬 <a href='tg://user?id={uid}'>Написать клиенту {full_name}</a>"
-        text += f"\n⚠️ Если ссылка не открылась — найди в TG по ID: <code>{uid}</code>"
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "💬 Написать клиенту",
+                callback_data=f"write_{uid}_{lid}"
+            )
+        ]])
 
     # ── Отправляем владельцу и менеджеру ───────────────────
     for rid in [OWNER_ID, MANAGER_USER_ID]:
         if rid:
             try:
                 await context.bot.send_message(
-                    chat_id=rid, text=text, parse_mode='HTML')
+                    chat_id=rid, text=text,
+                    parse_mode='HTML',
+                    reply_markup=kb)
             except Exception as e:
                 logger.error(f"notify {rid}: {e}")
 
@@ -1280,6 +1292,35 @@ async def button_cb(update, context):
                               else 'Другой (уточнить с менеджером)')
         await q.edit_message_text(f"🏙 {st['data']['city']} ✅")
         await finalize(update, context, uid)
+        return
+
+    # ── НАПИСАТЬ КЛИЕНТУ (кнопка из уведомления) ────────────
+    if d.startswith("write_"):
+        try:
+            parts     = d.split("_")
+            client_id = int(parts[1])
+            lid_str   = parts[2] if len(parts) > 2 else "?"
+            manager_id = uid
+
+            RELAY_SESSIONS[manager_id] = client_id
+            RELAY_SESSIONS[client_id]  = manager_id
+
+            await q.edit_message_reply_markup(reply_markup=None)
+            await context.bot.send_message(
+                chat_id=manager_id,
+                text=(
+                    f"✏️ <b>Диалог с клиентом открыт</b>\n"
+                    f"Заявка: <b>{lid_str}</b> | "
+                    f"ID клиента: <code>{client_id}</code>\n\n"
+                    f"Напишите следующее сообщение — "
+                    f"бот перешлёт его клиенту.\n\n"
+                    f"Завершить диалог: /endchat"
+                ),
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"write_: {e}")
+            await q.answer("Ошибка — попробуйте /msg")
         return
 
 # ════════════════════════════════════════════════════════════
