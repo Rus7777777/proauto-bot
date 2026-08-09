@@ -35,7 +35,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from dotenv import load_dotenv
 from telegram import (
-    Update, InputMediaPhoto,
+    Update, InputMediaPhoto, InputMediaVideo,
     InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
@@ -886,9 +886,9 @@ async def publish(update, context, info):
             media_cache[mgid] = {'photos':[],'caption':'','info':info}
             asyncio.create_task(_album(mgid, context))
         if msg.photo:
-            media_cache[mgid]['photos'].append(msg.photo[-1].file_id)
+            media_cache[mgid]['photos'].append(('photo', msg.photo[-1].file_id))
         if msg.video:
-            media_cache[mgid]['photos'].append(msg.video.file_id)
+            media_cache[mgid]['photos'].append(('video', msg.video.file_id))
         if msg.caption and not media_cache[mgid]['caption']:
             media_cache[mgid]['caption'] = msg.caption
         return
@@ -950,8 +950,19 @@ async def _album(mgid, context):
     fmt = format_post(caption, pid, None)
     if not fmt: del media_cache[mgid]; return
     try:
-        media = ([InputMediaPhoto(media=photos[0], caption=fmt, parse_mode='HTML')]
-                 + [InputMediaPhoto(media=p) for p in photos[1:]])
+        # Каждый элемент альбома — (тип, file_id). Раньше все элементы
+        # (в т.ч. видео) заворачивались в InputMediaPhoto, из-за чего
+        # Telegram отклонял альбом с видео ошибкой "Can't use file of
+        # type video as photo". Теперь тип элемента учитывается.
+        def _media_item(kind, file_id, caption=None, parse_mode=None):
+            cls = InputMediaVideo if kind == 'video' else InputMediaPhoto
+            if caption is not None:
+                return cls(media=file_id, caption=caption, parse_mode=parse_mode)
+            return cls(media=file_id)
+
+        first_kind, first_id = photos[0]
+        media = [_media_item(first_kind, first_id, caption=fmt, parse_mode='HTML')]
+        media += [_media_item(k, fid) for k, fid in photos[1:]]
         sent = await context.bot.send_media_group(chat_id=TARGET_GROUP_ID, media=media)
         pmid = sent[0].message_id if sent else None
         if pmid:
@@ -984,12 +995,19 @@ async def notify_manager(context, lid, data):
       - Есть username → https://t.me/username  (работает везде)
       - Нет username  → tg://user?id=ID        (работает в TG-приложении,
                                                  бот должен знать этого пользователя)
+    Плюс, если заявка привязана к конкретному объявлению (pub_id),
+    добавляем кликабельную ссылку на ОРИГИНАЛ этого объявления в
+    группе-источнике — чтобы менеджер мог сразу перейти туда и
+    связаться с тем, кто изначально выложил авто.
     """
     uid = data['user_id']
     un  = data.get('username')
     fn  = data.get('first_name') or 'Клиент'
     ln  = data.get('last_name') or ''
     full_name = f"{fn} {ln}".strip()
+
+    # Подтягиваем данные исходной публикации (для ссылки на оригинал)
+    pub = find_pub(data.get('pub_id')) if data.get('pub_id') else None
 
     text = f"🆕 <b>ЗАЯВКА {lid}</b>\n\n"
 
@@ -1020,23 +1038,30 @@ async def notify_manager(context, lid, data):
         if data.get(k):
             text += f"• {label}: {data[k]}\n"
 
+    # ── Ссылка на оригинал объявления (группа-источник) ─────
+    if pub and pub.get('source_link'):
+        text += f"\n🔗 <a href='{pub['source_link']}'>Оригинал объявления в группе-источнике</a>\n"
+
     # ── Кнопки для менеджера ───────────────────────────────
-    # Если есть username — кнопка открывает чат напрямую
-    # Если нет — кнопка запускает relay через бота
+    # Если есть username — кнопка открывает чат напрямую.
+    # Если нет — даём сразу два варианта: попытку прямого deep-link
+    # (работает в большинстве случаев внутри приложения Telegram) и
+    # гарантированно рабочий вариант через relay бота (/msg или кнопка).
+    rows = []
     if un:
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "💬 Написать клиенту",
-                url=f"https://t.me/{un}"
-            )
-        ]])
+        rows.append([InlineKeyboardButton(
+            "💬 Написать клиенту", url=f"https://t.me/{un}"
+        )])
     else:
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "💬 Написать клиенту",
-                callback_data=f"write_{uid}_{lid}"
-            )
-        ]])
+        rows.append([
+            InlineKeyboardButton("💬 Открыть чат", url=f"tg://user?id={uid}"),
+            InlineKeyboardButton("✉️ Через бота", callback_data=f"write_{uid}_{lid}"),
+        ])
+    if pub and pub.get('source_link'):
+        rows.append([InlineKeyboardButton(
+            "🔗 Оригинал объявления", url=pub['source_link']
+        )])
+    kb = InlineKeyboardMarkup(rows)
 
     # ── Отправляем владельцу и менеджеру ───────────────────
     for rid in [OWNER_ID, MANAGER_USER_ID]:
