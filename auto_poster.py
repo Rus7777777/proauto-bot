@@ -1044,19 +1044,23 @@ async def notify_manager(context, lid, data):
 
     # ── Кнопки для менеджера ───────────────────────────────
     # Если есть username — кнопка открывает чат напрямую.
-    # Если нет — даём сразу два варианта: попытку прямого deep-link
-    # (работает в большинстве случаев внутри приложения Telegram) и
-    # гарантированно рабочий вариант через relay бота (/msg или кнопка).
+    # Если нет — используем ТОЛЬКО callback-кнопку через relay бота.
+    # ВАЖНО: url=tg://user?id=... как inline-кнопка не годится — Telegram
+    # проверяет настройки приватности получателя и, если они ограничены
+    # (стандартная ситуация для большинства клиентов), отклоняет ВЕСЬ
+    # запрос sendMessage целиком с ошибкой "Button_user_privacy_restricted",
+    # из-за чего пропадает вся заявка, а не только кнопка. Текстовая
+    # ссылка tg://user?id= в теле сообщения (выше) этой проблеме не
+    # подвержена — это другой механизм, её оставляем.
     rows = []
     if un:
         rows.append([InlineKeyboardButton(
             "💬 Написать клиенту", url=f"https://t.me/{un}"
         )])
     else:
-        rows.append([
-            InlineKeyboardButton("💬 Открыть чат", url=f"tg://user?id={uid}"),
-            InlineKeyboardButton("✉️ Через бота", callback_data=f"write_{uid}_{lid}"),
-        ])
+        rows.append([InlineKeyboardButton(
+            "✉️ Написать через бота", callback_data=f"write_{uid}_{lid}"
+        )])
     if pub and pub.get('source_link'):
         rows.append([InlineKeyboardButton(
             "🔗 Оригинал объявления", url=pub['source_link']
@@ -1073,6 +1077,15 @@ async def notify_manager(context, lid, data):
                     reply_markup=kb)
             except Exception as e:
                 logger.error(f"notify {rid}: {e}")
+                # Подстраховка: если сообщение не ушло именно из-за
+                # клавиатуры (например, снова какая-то кнопка не понравится
+                # Telegram по новой причине) — пробуем отправить хотя бы
+                # текст заявки без кнопок, чтобы менеджер её точно увидел.
+                try:
+                    await context.bot.send_message(
+                        chat_id=rid, text=text, parse_mode='HTML')
+                except Exception as e2:
+                    logger.error(f"notify {rid} (fallback без кнопок): {e2}")
 
 # ════════════════════════════════════════════════════════════
 # БРИФ — ФИНАЛИЗАЦИЯ
