@@ -29,7 +29,7 @@ except ImportError:
                    capture_output=True)
 
 # ── Импорты ──────────────────────────────────────────────────
-import asyncio, re, json, logging, threading
+import asyncio, re, json, logging, threading, sqlite3
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -61,8 +61,9 @@ PORT              = int(os.getenv('PORT', 3000))
 DATA_DIR          = os.getenv('DATA_DIR', '/app/data')
 
 os.makedirs(DATA_DIR, exist_ok=True)
-PUBS_DB  = os.path.join(DATA_DIR, 'publications.json')
-LEADS_DB = os.path.join(DATA_DIR, 'leads.json')
+PUBS_DB  = os.path.join(DATA_DIR, 'publications.json')   # legacy JSON (бэкап после миграции)
+LEADS_DB = os.path.join(DATA_DIR, 'leads.json')          # legacy JSON (бэкап после миграции)
+SQLITE_DB = os.path.join(DATA_DIR, 'proauto.db')         # основное хранилище
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s',
@@ -576,33 +577,207 @@ def has_rights(uid):
 # БАЗА ДАННЫХ
 # ════════════════════════════════════════════════════════════
 
+# ════════════════════════════════════════════════════════════
+# БАЗА ДАННЫХ — SQLite (надёжное хранилище)
+# ════════════════════════════════════════════════════════════
+#
+# Почему SQLite, а не JSON-файлы, как было раньше:
+#   • JSON перезаписывался целиком при каждом сохранении — при двух
+#     публикациях в одну секунду одна могла затереть другую (гонка),
+#     то есть терялись заявки/объявления.
+#   • SQLite с журналом WAL безопасно обрабатывает параллельную запись.
+#
+# ВАЖНО про совместимость: функции _load/_save/save_pub/find_pub/
+# next_pub_id/save_lead/next_lead_id снаружи ведут себя ТОЧНО так же,
+# как раньше (те же аргументы, те же форматы данных), поэтому весь
+# остальной код (cmd_stats, cmd_leads, button_cb и т.д.) не меняется.
+
+_db_lock = threading.Lock()
+
+def _db_conn():
+    # timeout=30 — ждём, если база временно занята другой записью,
+    # вместо мгновенной ошибки. WAL включаем при каждом соединении.
+    conn = sqlite3.connect(SQLITE_DB, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=30000;")
+    except Exception as e:
+        logger.error(f"db pragma: {e}")
+    return conn
+
+def _db_init():
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS meta (
+                    key   TEXT PRIMARY KEY,
+                    value INTEGER
+                )""")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS publications (
+                    pub_id TEXT PRIMARY KEY,
+                    data   TEXT NOT NULL
+                )""")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS leads (
+                    lead_id TEXT PRIMARY KEY,
+                    data    TEXT NOT NULL
+                )""")
+            # Счётчики хранятся в meta, чтобы next_pub_id/next_lead_id
+            # выдавали строго возрастающие номера без коллизий.
+            conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('pub_counter',0)")
+            conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('lead_counter',0)")
+            conn.commit()
+        finally:
+            conn.close()
+
+def _migrate_json_to_sqlite():
+    """
+    Один раз переносит данные из старых JSON-файлов в SQLite.
+    JSON-файлы НЕ удаляются — остаются как резервная копия.
+    Повторный запуск безопасен: если запись с таким id уже есть в
+    SQLite, она не перезатирается (INSERT OR IGNORE).
+    """
+    migrated_pubs = 0
+    migrated_leads = 0
+
+    # --- публикации ---
+    if os.path.exists(PUBS_DB):
+        try:
+            with open(PUBS_DB, 'r', encoding='utf-8') as fp:
+                old = json.load(fp)
+            with _db_lock:
+                conn = _db_conn()
+                try:
+                    for pid, pdata in (old.get('publications') or {}).items():
+                        cur = conn.execute(
+                            "INSERT OR IGNORE INTO publications(pub_id,data) VALUES(?,?)",
+                            (pid, json.dumps(pdata, ensure_ascii=False)))
+                        if cur.rowcount:
+                            migrated_pubs += 1
+                    # Счётчик берём максимальным из старого JSON и текущего SQLite
+                    old_counter = int(old.get('counter', 0) or 0)
+                    row = conn.execute("SELECT value FROM meta WHERE key='pub_counter'").fetchone()
+                    cur_counter = int(row['value']) if row else 0
+                    conn.execute("UPDATE meta SET value=? WHERE key='pub_counter'",
+                                 (max(old_counter, cur_counter),))
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"migrate publications: {e}")
+
+    # --- заявки ---
+    if os.path.exists(LEADS_DB):
+        try:
+            with open(LEADS_DB, 'r', encoding='utf-8') as fp:
+                old = json.load(fp)
+            with _db_lock:
+                conn = _db_conn()
+                try:
+                    for lid, ldata in (old.get('leads') or {}).items():
+                        cur = conn.execute(
+                            "INSERT OR IGNORE INTO leads(lead_id,data) VALUES(?,?)",
+                            (lid, json.dumps(ldata, ensure_ascii=False)))
+                        if cur.rowcount:
+                            migrated_leads += 1
+                    old_counter = int(old.get('counter', 0) or 0)
+                    row = conn.execute("SELECT value FROM meta WHERE key='lead_counter'").fetchone()
+                    cur_counter = int(row['value']) if row else 0
+                    conn.execute("UPDATE meta SET value=? WHERE key='lead_counter'",
+                                 (max(old_counter, cur_counter),))
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"migrate leads: {e}")
+
+    if migrated_pubs or migrated_leads:
+        logger.info(f"🔄 Миграция JSON→SQLite: {migrated_pubs} публикаций, "
+                    f"{migrated_leads} заявок перенесено (JSON сохранён как бэкап)")
+    else:
+        logger.info("🗄 SQLite готов (миграция не потребовалась)")
+
+# --- Совместимость: _load/_save в старом формате, но поверх SQLite ---
+# Возвращают/принимают ровно те же структуры, что и прежние JSON-версии:
+#   publications → {'counter':N, 'publications':{pub_id:{...}}}
+#   leads        → {'counter':N, 'leads':{lead_id:{...}}}
+# Благодаря этому cmd_stats/cmd_leads и прочий код работают без изменений.
+
 def _load(f, default=None):
     if default is None: default = {}
-    if os.path.exists(f):
-        try:
-            with open(f,'r',encoding='utf-8') as fp:
-                return json.load(fp)
-        except: return default
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                if f == PUBS_DB:
+                    rows = conn.execute("SELECT pub_id,data FROM publications").fetchall()
+                    pubs = {r['pub_id']: json.loads(r['data']) for r in rows}
+                    row = conn.execute("SELECT value FROM meta WHERE key='pub_counter'").fetchone()
+                    counter = int(row['value']) if row else 0
+                    return {'counter': counter, 'publications': pubs}
+                elif f == LEADS_DB:
+                    rows = conn.execute("SELECT lead_id,data FROM leads").fetchall()
+                    lds = {r['lead_id']: json.loads(r['data']) for r in rows}
+                    row = conn.execute("SELECT value FROM meta WHERE key='lead_counter'").fetchone()
+                    counter = int(row['value']) if row else 0
+                    return {'counter': counter, 'leads': lds}
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"_load {f}: {e}")
+        return default
     return default
 
 def _save(f, data):
+    # Полная перезапись коллекции. Используется редко (в основном код
+    # ходит через save_pub/save_lead с точечной записью), но оставлено
+    # для полной совместимости со старым интерфейсом.
     try:
-        with open(f,'w',encoding='utf-8') as fp:
-            json.dump(data, fp, ensure_ascii=False, indent=2)
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                if f == PUBS_DB:
+                    for pid, pdata in (data.get('publications') or {}).items():
+                        conn.execute(
+                            "INSERT OR REPLACE INTO publications(pub_id,data) VALUES(?,?)",
+                            (pid, json.dumps(pdata, ensure_ascii=False)))
+                    if 'counter' in data:
+                        conn.execute("UPDATE meta SET value=? WHERE key='pub_counter'",
+                                     (int(data['counter']),))
+                elif f == LEADS_DB:
+                    for lid, ldata in (data.get('leads') or {}).items():
+                        conn.execute(
+                            "INSERT OR REPLACE INTO leads(lead_id,data) VALUES(?,?)",
+                            (lid, json.dumps(ldata, ensure_ascii=False)))
+                    if 'counter' in data:
+                        conn.execute("UPDATE meta SET value=? WHERE key='lead_counter'",
+                                     (int(data['counter']),))
+                conn.commit()
+            finally:
+                conn.close()
     except Exception as e:
         logger.error(f"_save {f}: {e}")
 
 def next_pub_id():
-    db = _load(PUBS_DB, {'counter':0,'publications':{}})
-    db['counter'] = db.get('counter',0) + 1
-    nid = f"id_{db['counter']:04d}"
-    _save(PUBS_DB, db)
-    return nid
+    # Атомарный инкремент счётчика прямо в SQL — исключает коллизию
+    # номеров при одновременных публикациях.
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("UPDATE meta SET value=value+1 WHERE key='pub_counter'")
+            row = conn.execute("SELECT value FROM meta WHERE key='pub_counter'").fetchone()
+            conn.commit()
+            n = int(row['value'])
+        finally:
+            conn.close()
+    return f"id_{n:04d}"
 
 def save_pub(pub_id, **kw):
-    db = _load(PUBS_DB, {'counter':0,'publications':{}})
     now = datetime.now()
-    # Извлекаем бренд/модель из оригинала
+    # Извлекаем бренд/модель из оригинала (логика без изменений)
     orig = kw.get('original_caption','')
     brand = None
     model_name = None
@@ -623,7 +798,7 @@ def save_pub(pub_id, **kw):
     if pmid:
         telegram_link = f"https://t.me/{TARGET_CHANNEL.replace('@','')}/{pmid}"
 
-    db['publications'][pub_id] = {
+    record = {
         **kw,
         'pub_id': pub_id,
         'car_brand': brand,
@@ -633,23 +808,60 @@ def save_pub(pub_id, **kw):
         'published_at': now.isoformat(),
         'expires_at': (now + timedelta(days=30)).isoformat(),
     }
-    _save(PUBS_DB, db)
-    logger.info(f"💾 {pub_id} | {brand or '?'} | {model_name or '?'}")
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO publications(pub_id,data) VALUES(?,?)",
+                    (pub_id, json.dumps(record, ensure_ascii=False)))
+                conn.commit()
+            finally:
+                conn.close()
+        logger.info(f"💾 {pub_id} | {brand or '?'} | {model_name or '?'}")
+    except Exception as e:
+        logger.error(f"save_pub {pub_id}: {e}")
 
 def find_pub(pub_id):
-    return _load(PUBS_DB,{'counter':0,'publications':{}})['publications'].get(pub_id)
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                row = conn.execute(
+                    "SELECT data FROM publications WHERE pub_id=?", (pub_id,)).fetchone()
+                return json.loads(row['data']) if row else None
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"find_pub {pub_id}: {e}")
+        return None
 
 def next_lead_id():
-    db = _load(LEADS_DB, {'counter':0,'leads':{}})
-    db['counter'] = db.get('counter',0) + 1
-    nid = f"lead_{db['counter']:05d}"
-    _save(LEADS_DB, db)
-    return nid
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("UPDATE meta SET value=value+1 WHERE key='lead_counter'")
+            row = conn.execute("SELECT value FROM meta WHERE key='lead_counter'").fetchone()
+            conn.commit()
+            n = int(row['value'])
+        finally:
+            conn.close()
+    return f"lead_{n:05d}"
 
 def save_lead(lid, data):
-    db = _load(LEADS_DB, {'counter':0,'leads':{}})
-    db['leads'][lid] = {**data, 'created_at': datetime.now().isoformat()}
-    _save(LEADS_DB, db)
+    record = {**data, 'created_at': datetime.now().isoformat()}
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO leads(lead_id,data) VALUES(?,?)",
+                    (lid, json.dumps(record, ensure_ascii=False)))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"save_lead {lid}: {e}")
 
 def get_state(uid):
     if uid not in BRIEF_STATES:
@@ -808,18 +1020,65 @@ def build_footer(text, pub_id):
     return (f"\n\nРассчитаем стоимость до Вашего дома 🏠 ✅\n{mgr}\n"
             f"(Ответ в течении часа)\n{order}\n\n{ch}")
 
+def _hashtag_safe(s):
+    # Хештег в Telegram не может содержать пробелы/дефисы/точки —
+    # убираем всё, кроме букв и цифр, получаем слитный тег.
+    return re.sub(r'[^0-9A-Za-zА-Яа-яЁё]+', '', s)
+
 def hashtags(text):
     tl = text.lower()
-    tags = set()
-    for kw,tag in [('bmw','#BMW'),('mercedes','#Mercedes'),('audi','#Audi'),
-                   ('toyota','#Toyota'),('lexus','#Lexus'),('kia','#Kia'),
-                   ('hyundai','#Hyundai'),('volkswagen','#Volkswagen'),
-                   ('porsche','#Porsche'),('tesla','#Tesla'),
-                   ('geely','#Geely'),('haval','#Haval'),('byd','#BYD'),
-                   ('volvo','#Volvo'),('land rover','#LandRover')]:
-        if kw in tl: tags.add(tag)
-        if len(tags)>=2: break
-    return ' '.join(list(tags)[:2]+['#авточастно','#автоподзаказ','#ProAuto77'])
+    matched_brand_variant = None
+    matched_brand_key = None
+
+    # Ищем марку по ВСЕЙ базе автомобилей (все марки из CAR_DATABASE),
+    # а не по жёсткому списку из 15 популярных — работает для любой
+    # марки/модели, какая бы ни встретилась в объявлении. Сортируем
+    # варианты по убыванию длины, чтобы более специфичное совпадение
+    # (например "Range Rover Sport") матчилось раньше короткого
+    # ("Range Rover"), если оба присутствуют в тексте.
+    brand_candidates = []
+    for brand in CAR_DATABASE:
+        # Некоторые марки в базе записаны через "/" (алиасы),
+        # например "Lixiang / Li Auto" — проверяем каждый вариант.
+        for variant in re.split(r'\s*/\s*', brand):
+            if variant:
+                brand_candidates.append((variant, brand))
+    brand_candidates.sort(key=lambda x: -len(x[0]))
+
+    for variant, brand in brand_candidates:
+        if variant.lower() in tl:
+            matched_brand_variant = variant
+            matched_brand_key = brand
+            break
+
+    matched_model_variant = None
+    if matched_brand_variant:
+        # Модель ищем только внутри уже найденной марки — так тег модели
+        # не перепутает, например, BMW X3 и Audi Q3. Тоже сортируем по
+        # убыванию длины (например "911 Turbo" раньше просто "911").
+        model_candidates = []
+        for model in CAR_DATABASE[matched_brand_key]:
+            for variant in re.split(r'\s*/\s*', model):
+                if variant:
+                    model_candidates.append(variant)
+        model_candidates.sort(key=lambda x: -len(x))
+        for variant in model_candidates:
+            if variant.lower() in tl:
+                matched_model_variant = variant
+                break
+
+    tags = []
+    if matched_brand_variant:
+        brand_tag = '#' + _hashtag_safe(matched_brand_variant)
+        tags.append(brand_tag)
+        if matched_model_variant:
+            # Тег модели включает марку в начале (#BMWX5, а не просто
+            # #X5), чтобы не пересекаться с одноимёнными моделями
+            # у других марок и чтобы поиск по тегу сразу был однозначным.
+            model_tag = '#' + _hashtag_safe(matched_brand_variant) + _hashtag_safe(matched_model_variant)
+            tags.append(model_tag)
+
+    return ' '.join(tags[:2] + ['#авточастно', '#автоподзаказ', '#АвтоНаЗаказ', '#ProAuto77'])
 
 def format_post(original, pub_id, pub_link):
     if not original: return None
@@ -1512,6 +1771,27 @@ async def cmd_start(update, context):
     uid  = update.effective_user.id
     args = context.args
 
+    # ── Метка источника трафика ──────────────────────────────
+    # Ссылки вида t.me/proauto_23_bot?start=src_vk запоминают, откуда
+    # пришёл клиент. Метка сохраняется в состоянии и позже попадает в
+    # заявку (lead_source) — так в /stats видно, какой канал даёт заявки.
+    # Поддерживаются и комбинированные метки: src_vk_id_0013 (источник
+    # + конкретное объявление одновременно).
+    if args and args[0].startswith('src_'):
+        raw = args[0][4:]  # убираем "src_"
+        # если внутри есть привязка к объявлению вида ..._id_0013
+        m = re.search(r'(id_\d{4})', raw)
+        pub_from_src = m.group(1) if m else None
+        source = re.sub(r'_?id_\d{4}$', '', raw) or 'unknown'
+        st = get_state(uid)
+        st['data']['lead_source'] = source
+        if pub_from_src:
+            # превращаем в обычный сценарий "конкретное авто",
+            # переставив args, чтобы сработала ветка ниже
+            args = [pub_from_src]
+        else:
+            args = []
+
     if args and args[0].startswith('id_'):
         pid = args[0]
         pub = find_pub(pid)
@@ -1529,8 +1809,11 @@ async def cmd_start(update, context):
                         break
                 if cm: break
         cm = cm or 'автомобиль'
+        _prev_src = get_state(uid)['data'].get('lead_source')
         get_state(uid)['data'] = {
             'pub_id':pid,'car_model':cm,'interest_type':'specific_car'}
+        if _prev_src:
+            get_state(uid)['data']['lead_source'] = _prev_src
 
         kb = [
             [InlineKeyboardButton(f"✅ {cm[:45]}",  callback_data=f"yes_{pid}")],
@@ -1595,6 +1878,14 @@ async def cmd_stats(update, context):
     top = sorted(brands.items(), key=lambda x:-x[1])[:5]
     top_str = '\n'.join(f"  • {b}: {n}" for b,n in top) if top else "  нет данных"
 
+    # Разбивка заявок по источнику трафика (метки src_*)
+    sources = {}
+    for l in ld['leads'].values():
+        s = l.get('lead_source') or 'напрямую'
+        sources[s] = sources.get(s,0) + 1
+    src_top = sorted(sources.items(), key=lambda x:-x[1])[:8]
+    src_str = '\n'.join(f"  • {s}: {n}" for s,n in src_top) if src_top else "  нет данных"
+
     await update.message.reply_text(
         f"📊 <b>СТАТИСТИКА ProAuto</b>\n\n"
         f"📢 <b>Публикации:</b>\n"
@@ -1604,7 +1895,8 @@ async def cmd_stats(update, context):
         f"  Всего: {ld.get('counter',0)}\n"
         f"  За 7 дней: {rl}\n\n"
         f"📈 Конверсия: {round(rl/max(rp,1)*100,1)}%\n\n"
-        f"🏎️ <b>Топ марок:</b>\n{top_str}",
+        f"🏎️ <b>Топ марок:</b>\n{top_str}\n\n"
+        f"📡 <b>Источники заявок:</b>\n{src_str}",
         parse_mode='HTML')
 
 def _recent(dt_str, threshold):
@@ -1806,6 +2098,58 @@ def health_server():
 # ИНИЦИАЛИЗАЦИЯ
 # ════════════════════════════════════════════════════════════
 
+# ════════════════════════════════════════════════════════════
+# ГЛОБАЛЬНЫЙ ПЕРЕХВАТ ОШИБОК + АВТОБЭКАП
+# ════════════════════════════════════════════════════════════
+
+async def error_handler(update, context):
+    """
+    Ловит ЛЮБУЮ необработанную ошибку в боте, чтобы он не падал молча.
+    Пишет полный traceback в лог и шлёт краткое уведомление владельцу.
+    """
+    import traceback
+    err = context.error
+    tb = ''.join(traceback.format_exception(type(err), err, err.__traceback__))
+    logger.error(f"‼️ Необработанная ошибка: {err}\n{tb}")
+    if OWNER_ID:
+        try:
+            short = tb[-1500:] if len(tb) > 1500 else tb
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=(f"‼️ <b>Ошибка в боте</b>\n\n"
+                      f"<code>{err}</code>\n\n"
+                      f"Бот продолжает работать. Подробности в логах.\n"
+                      f"<pre>{short[-800:]}</pre>"),
+                parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"error_handler notify: {e}")
+
+async def _daily_backup(context):
+    """
+    Раз в сутки отправляет файл базы SQLite владельцу в личку —
+    страховка от сброса диска на хостинге (данные не пропадут).
+    """
+    if not OWNER_ID:
+        return
+    try:
+        if os.path.exists(SQLITE_DB):
+            with open(SQLITE_DB, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=OWNER_ID,
+                    document=f,
+                    filename=f"proauto_backup_{datetime.now():%Y%m%d}.db",
+                    caption=f"🗄 Автобэкап базы ProAuto\n{datetime.now():%d.%m.%Y %H:%M}")
+            logger.info("🗄 Автобэкап отправлен владельцу")
+    except Exception as e:
+        logger.error(f"backup: {e}")
+
+async def cmd_backup(update, context):
+    """Ручной бэкап по команде /backup — присылает базу прямо сейчас."""
+    if not has_rights(update.effective_user.id):
+        return
+    await _daily_backup(context)
+    await update.message.reply_text("🗄 Бэкап отправлен.")
+
 async def on_start(app):
     print("✅ Bot polling started!", flush=True)
     brands_count = len(CAR_DATABASE)
@@ -1817,6 +2161,18 @@ async def on_start(app):
     logger.info(
         "💰 Наценки: <5млн +40k | 5-7 +80k | 7-10 +100k | "
         "10-15 +180k | 15-20 +250k | 20-25 +350k | 25-30 +500k | 30+ +1млн | EUR/USD +1000")
+    # Планируем ежедневный автобэкап (если JobQueue доступна).
+    # JobQueue требует установки extras: pip install "python-telegram-bot[job-queue]".
+    # Если недоступна — не критично, есть ручная команда /backup.
+    try:
+        if app.job_queue:
+            app.job_queue.run_repeating(_daily_backup, interval=timedelta(days=1),
+                                        first=timedelta(minutes=5))
+            logger.info("🗄 Автобэкап запланирован (раз в сутки)")
+        else:
+            logger.warning("⚠️ JobQueue недоступна — автобэкап только вручную /backup")
+    except Exception as e:
+        logger.error(f"schedule backup: {e}")
 
 # ════════════════════════════════════════════════════════════
 # MAIN
@@ -1824,6 +2180,16 @@ async def on_start(app):
 
 def main():
     print("--- main() ---", flush=True)
+
+    # Инициализируем SQLite и переносим данные из старых JSON (если есть).
+    # Делается ДО запуска бота, чтобы данные были готовы к первому запросу.
+    try:
+        _db_init()
+        _migrate_json_to_sqlite()
+        print("--- SQLite готов ---", flush=True)
+    except Exception as e:
+        print(f"❌ Ошибка инициализации БД: {e}", flush=True)
+        import traceback; traceback.print_exc()
 
     threading.Thread(target=health_server, daemon=True).start()
     print("--- health thread OK ---", flush=True)
@@ -1844,10 +2210,14 @@ def main():
     app.add_handler(CommandHandler("msg",     cmd_msg))
     app.add_handler(CommandHandler("endchat", cmd_endchat))
     app.add_handler(CommandHandler("chats",   cmd_chats))
+    app.add_handler(CommandHandler("backup",  cmd_backup))
     app.add_handler(CallbackQueryHandler(button_cb))
     app.add_handler(MessageHandler(
         filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
         handle_msg))
+
+    # Глобальный перехватчик ошибок — бот не падает молча
+    app.add_error_handler(error_handler)
 
     print("--- run_polling() ---", flush=True)
     try:
