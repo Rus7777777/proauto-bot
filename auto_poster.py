@@ -836,6 +836,29 @@ def find_pub(pub_id):
         logger.error(f"find_pub {pub_id}: {e}")
         return None
 
+def update_pub_status(pub_id, status):
+    """Меняет статус публикации (active/expired/sold), не трогая остальные поля."""
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                row = conn.execute(
+                    "SELECT data FROM publications WHERE pub_id=?", (pub_id,)).fetchone()
+                if not row:
+                    return None
+                rec = json.loads(row['data'])
+                rec['status'] = status
+                rec['status_changed_at'] = datetime.now().isoformat()
+                conn.execute("UPDATE publications SET data=? WHERE pub_id=?",
+                             (json.dumps(rec, ensure_ascii=False), pub_id))
+                conn.commit()
+                return rec
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"update_pub_status {pub_id}: {e}")
+        return None
+
 def next_lead_id():
     with _db_lock:
         conn = _db_conn()
@@ -862,6 +885,47 @@ def save_lead(lid, data):
                 conn.close()
     except Exception as e:
         logger.error(f"save_lead {lid}: {e}")
+
+def find_lead(lid):
+    """Возвращает данные заявки по id или None."""
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                row = conn.execute(
+                    "SELECT data FROM leads WHERE lead_id=?", (lid,)).fetchone()
+                return json.loads(row['data']) if row else None
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"find_lead {lid}: {e}")
+        return None
+
+def update_lead(lid, **changes):
+    """
+    Точечно обновляет поля заявки (например статус), не затирая остальные.
+    Возвращает обновлённую запись или None, если заявки нет.
+    """
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                row = conn.execute(
+                    "SELECT data FROM leads WHERE lead_id=?", (lid,)).fetchone()
+                if not row:
+                    return None
+                rec = json.loads(row['data'])
+                rec.update(changes)
+                conn.execute(
+                    "UPDATE leads SET data=? WHERE lead_id=?",
+                    (json.dumps(rec, ensure_ascii=False), lid))
+                conn.commit()
+                return rec
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"update_lead {lid}: {e}")
+        return None
 
 def get_state(uid):
     if uid not in BRIEF_STATES:
@@ -1324,6 +1388,14 @@ async def notify_manager(context, lid, data):
         rows.append([InlineKeyboardButton(
             "🔗 Оригинал объявления", url=pub['source_link']
         )])
+    # ── Кнопки статуса заявки (мини-CRM) ───────────────────
+    # Меняют статус в один тап: новая → в работе → сделка/отказ.
+    # /stats потом считает по этим статусам реальную конверсию.
+    rows.append([
+        InlineKeyboardButton("🔄 В работу", callback_data=f"st_{lid}_work"),
+        InlineKeyboardButton("✅ Сделка",   callback_data=f"st_{lid}_deal"),
+        InlineKeyboardButton("❌ Отказ",    callback_data=f"st_{lid}_lost"),
+    ])
     kb = InlineKeyboardMarkup(rows)
 
     # ── Отправляем владельцу и менеджеру ───────────────────
@@ -1360,6 +1432,8 @@ async def finalize(update, context, uid):
         'username': user.username,
         'first_name': user.first_name,
         'last_name': user.last_name,
+        'status': 'new',        # начальный статус для мини-CRM
+        'notified': False,      # для напоминания о зависшей заявке
         **data
     }
     save_lead(lid, ld)
@@ -1626,12 +1700,75 @@ async def button_cb(update, context):
         await finalize(update, context, uid)
         return
 
+    # ── СТАТУС ЗАЯВКИ (мини-CRM) ────────────────────────────
+    # callback: st_{lead_id}_{status}. lead_id сам содержит "_"
+    # (lead_00017), поэтому статус берём как последний сегмент,
+    # а lead_id — всё, что между "st_" и последним "_".
+    if d.startswith("st_"):
+        try:
+            body = d[3:]                    # "lead_00017_deal"
+            status = body.rsplit("_", 1)[1] # "deal"
+            lid    = body.rsplit("_", 1)[0] # "lead_00017"
+            labels = {'work':'🔄 В работе', 'deal':'✅ Сделка', 'lost':'❌ Отказ'}
+            rec = update_lead(lid, status=status,
+                              status_at=datetime.now().isoformat(),
+                              status_by=uid)
+            if not rec:
+                await q.answer("Заявка не найдена")
+                return
+            await q.answer(f"Статус: {labels.get(status, status)}")
+
+            # Реферальный бонус: если сделка закрыта и клиента кто-то
+            # привёл (referred_by) — уведомляем пригласившего.
+            if status == 'deal' and rec.get('referred_by') and not rec.get('ref_rewarded'):
+                referrer = rec['referred_by']
+                try:
+                    car = rec.get('car_model') or 'авто'
+                    await context.bot.send_message(
+                        chat_id=referrer,
+                        text=(f"🎉 <b>Ваш реферальный бонус!</b>\n\n"
+                              f"Приглашённый вами человек оформил покупку ({car}).\n"
+                              f"Свяжитесь с менеджером ProAuto для получения бонуса. 🎁"),
+                        parse_mode='HTML')
+                    update_lead(lid, ref_rewarded=True)
+                    # и владельцу — напоминание выдать бонус
+                    if OWNER_ID:
+                        await context.bot.send_message(
+                            chat_id=OWNER_ID,
+                            text=(f"🎁 Реферальный бонус к выдаче!\n"
+                                  f"Пригласивший: <code>{referrer}</code>\n"
+                                  f"Заявка: {lid}"),
+                            parse_mode='HTML')
+                except Exception as e:
+                    logger.error(f"ref reward {lid}: {e}")
+
+            try:
+                base = q.message.text_html if q.message.text else (q.message.caption_html or "")
+            except Exception:
+                base = q.message.text or ""
+            new_text = f"{base}\n\n<b>Статус:</b> {labels.get(status, status)}"
+            try:
+                if q.message.text:
+                    await q.edit_message_text(new_text, parse_mode='HTML',
+                                              disable_web_page_preview=True)
+                else:
+                    await q.edit_message_caption(new_text, parse_mode='HTML')
+            except Exception:
+                try: await q.edit_message_reply_markup(reply_markup=None)
+                except Exception: pass
+        except Exception as e:
+            logger.error(f"st_: {e}")
+            await q.answer("Ошибка смены статуса")
+        return
+
     # ── НАПИСАТЬ КЛИЕНТУ (кнопка из уведомления) ────────────
     if d.startswith("write_"):
         try:
-            parts     = d.split("_")
-            client_id = int(parts[1])
-            lid_str   = parts[2] if len(parts) > 2 else "?"
+            # формат write_{client_id}_{lead_id}, где lead_id = "lead_00017"
+            body = d[len("write_"):]        # "7631042064_lead_00017"
+            first = body.split("_", 1)      # ["7631042064", "lead_00017"]
+            client_id = int(first[0])
+            lid_str   = first[1] if len(first) > 1 else "?"
             manager_id = uid
 
             RELAY_SESSIONS[manager_id] = client_id
@@ -1792,6 +1929,21 @@ async def cmd_start(update, context):
         else:
             args = []
 
+    # ── Реферальная ссылка ───────────────────────────────────
+    # t.me/bot?start=ref_123456789 — 123456789 это user_id пригласившего.
+    # Запоминаем, кто привёл клиента (referred_by), чтобы при сделке
+    # начислить бонус пригласившему. Метку источника ставим 'referral'.
+    if args and args[0].startswith('ref_'):
+        try:
+            referrer_id = int(args[0][4:])
+            if referrer_id != uid:   # нельзя пригласить самого себя
+                st = get_state(uid)
+                st['data']['referred_by'] = referrer_id
+                st['data'].setdefault('lead_source', 'referral')
+        except ValueError:
+            pass
+        args = []
+
     if args and args[0].startswith('id_'):
         pid = args[0]
         pub = find_pub(pid)
@@ -1886,6 +2038,19 @@ async def cmd_stats(update, context):
     src_top = sorted(sources.items(), key=lambda x:-x[1])[:8]
     src_str = '\n'.join(f"  • {s}: {n}" for s,n in src_top) if src_top else "  нет данных"
 
+    # Воронка по статусам (мини-CRM): конверсия заявка→сделка
+    statuses = {'new':0, 'work':0, 'deal':0, 'lost':0}
+    for l in ld['leads'].values():
+        s = l.get('status') or 'new'
+        statuses[s] = statuses.get(s, 0) + 1
+    total_leads = sum(statuses.values())
+    deals = statuses.get('deal', 0)
+    conv_deal = round(deals / max(total_leads, 1) * 100, 1)
+    funnel_str = (f"  🆕 Новые: {statuses.get('new',0)}\n"
+                  f"  🔄 В работе: {statuses.get('work',0)}\n"
+                  f"  ✅ Сделки: {statuses.get('deal',0)}\n"
+                  f"  ❌ Отказы: {statuses.get('lost',0)}")
+
     await update.message.reply_text(
         f"📊 <b>СТАТИСТИКА ProAuto</b>\n\n"
         f"📢 <b>Публикации:</b>\n"
@@ -1894,7 +2059,8 @@ async def cmd_stats(update, context):
         f"📋 <b>Заявки:</b>\n"
         f"  Всего: {ld.get('counter',0)}\n"
         f"  За 7 дней: {rl}\n\n"
-        f"📈 Конверсия: {round(rl/max(rp,1)*100,1)}%\n\n"
+        f"🎯 <b>Воронка заявок:</b>\n{funnel_str}\n"
+        f"  📈 Конверсия в сделку: {conv_deal}%\n\n"
         f"🏎️ <b>Топ марок:</b>\n{top_str}\n\n"
         f"📡 <b>Источники заявок:</b>\n{src_str}",
         parse_mode='HTML')
@@ -1911,13 +2077,15 @@ async def cmd_leads(update, context):
         return
     items = sorted(db['leads'].items(),
                    key=lambda x: x[1].get('created_at',''), reverse=True)[:10]
+    _stemoji = {'new':'🆕','work':'🔄','deal':'✅','lost':'❌'}
     text = f"📋 <b>ПОСЛЕДНИЕ {len(items)} ЗАЯВОК</b>\n\n"
     for lid,l in items:
         try:
             d = datetime.fromisoformat(l.get('created_at','')).strftime('%d.%m %H:%M')
         except: d = "?"
         itype = l.get('interest_type','')
-        text += f"<b>{lid}</b> | {d}\n"
+        stt = l.get('status','new')
+        text += f"{_stemoji.get(stt,'🆕')} <b>{lid}</b> | {d}\n"
         text += f"👤 @{l.get('username','?')} ({l.get('first_name','')})\n"
         if itype == 'consultation':
             text += "✍️ Консультация\n"
@@ -1927,6 +2095,7 @@ async def cmd_leads(update, context):
             text += f"🔍 {l.get('brand','')} {l.get('model','')}\n"
         if l.get('city'):  text += f"🏙 {l['city']}\n"
         if l.get('timing'):text += f"⏰ {l['timing']}\n"
+        if l.get('lead_source'): text += f"📡 {l['lead_source']}\n"
         text += "━━━━━━━━━\n"
     if len(text)>4000: text=text[:3950]+"..."
     await update.message.reply_text(text, parse_mode='HTML')
@@ -2143,12 +2312,112 @@ async def _daily_backup(context):
     except Exception as e:
         logger.error(f"backup: {e}")
 
+async def _check_stale_leads(context):
+    """
+    Каждые 15 минут ищет заявки со статусом 'new' старше 1 часа, по которым
+    ещё не отправляли напоминание, и напоминает менеджеру/владельцу.
+    Скорость ответа = главный рычаг конверсии, поэтому не даём заявке зависнуть.
+    """
+    try:
+        db = _load(LEADS_DB, {'counter':0,'leads':{}})
+        now = datetime.now()
+        for lid, l in db['leads'].items():
+            if l.get('status', 'new') != 'new':
+                continue
+            if l.get('notified'):
+                continue
+            try:
+                created = datetime.fromisoformat(l.get('created_at',''))
+            except Exception:
+                continue
+            if now - created < timedelta(hours=1):
+                continue
+            # заявка висит больше часа и без ответа — напоминаем
+            car = l.get('car_model') or f"{l.get('brand','')} {l.get('model','')}".strip() or 'заявка'
+            uname = f"@{l['username']}" if l.get('username') else f"id {l.get('user_id')}"
+            mins = int((now - created).total_seconds() // 60)
+            txt = (f"⏰ <b>Зависшая заявка {lid}</b>\n\n"
+                   f"🚗 {car}\n"
+                   f"👤 {uname}\n"
+                   f"🕐 Без ответа уже {mins} мин\n\n"
+                   f"Клиенту обещан ответ в течение часа — стоит связаться.")
+            for rid in [OWNER_ID, MANAGER_USER_ID]:
+                if rid:
+                    try:
+                        await context.bot.send_message(chat_id=rid, text=txt, parse_mode='HTML')
+                    except Exception as e:
+                        logger.error(f"stale notify {rid}: {e}")
+            update_lead(lid, notified=True)
+            logger.info(f"⏰ Напоминание о зависшей заявке {lid}")
+    except Exception as e:
+        logger.error(f"_check_stale_leads: {e}")
+
+async def _check_expired_pubs(context):
+    """
+    Раз в сутки ищет публикации старше expires_at (30 дней) со статусом
+    'active' и присылает владельцу сводку "актуальны ли ещё эти авто?".
+    Сам НЕ удаляет из канала (не может знать, продано ли) — помечает
+    'expired' и уведомляет, чтобы владелец решил вручную.
+    """
+    try:
+        db = _load(PUBS_DB, {'counter':0,'publications':{}})
+        now = datetime.now()
+        expired = []
+        for pid, p in db['publications'].items():
+            if p.get('status') != 'active':
+                continue
+            try:
+                exp = datetime.fromisoformat(p.get('expires_at',''))
+            except Exception:
+                continue
+            if now < exp:
+                continue
+            expired.append((pid, p))
+        if not expired:
+            return
+        # помечаем и собираем сводку
+        lines = []
+        for pid, p in expired[:30]:
+            update_pub_status(pid, 'expired')
+            car = p.get('car_model') or p.get('car_brand') or '?'
+            link = p.get('telegram_link') or ''
+            lines.append(f"• {pid} — {car} {link}".strip())
+        if OWNER_ID:
+            txt = ("🗓 <b>Объявления старше 30 дней</b>\n"
+                   "Проверь актуальность — возможно, уже проданы:\n\n"
+                   + "\n".join(lines))
+            if len(txt) > 4000: txt = txt[:3950] + "..."
+            try:
+                await context.bot.send_message(chat_id=OWNER_ID, text=txt,
+                                               parse_mode='HTML',
+                                               disable_web_page_preview=True)
+            except Exception as e:
+                logger.error(f"expired notify: {e}")
+        logger.info(f"🗓 Помечено {len(expired)} устаревших объявлений")
+    except Exception as e:
+        logger.error(f"_check_expired_pubs: {e}")
+
 async def cmd_backup(update, context):
     """Ручной бэкап по команде /backup — присылает базу прямо сейчас."""
     if not has_rights(update.effective_user.id):
         return
     await _daily_backup(context)
     await update.message.reply_text("🗄 Бэкап отправлен.")
+
+async def cmd_ref(update, context):
+    """
+    /ref — выдаёт пользователю его персональную реферальную ссылку.
+    Доступна всем (и клиентам, и менеджеру), чтобы каждый мог приглашать.
+    """
+    uid = update.effective_user.id
+    link = f"https://t.me/{BOT_USERNAME}?start=ref_{uid}"
+    await update.message.reply_text(
+        f"🎁 <b>Ваша реферальная ссылка</b>\n\n"
+        f"Поделитесь ей с друзьями:\n"
+        f"<code>{link}</code>\n\n"
+        f"Когда приглашённый вами человек оформит покупку через ProAuto — "
+        f"вы получите бонус. Чем больше друзей — тем больше бонусов! 🚗",
+        parse_mode='HTML', disable_web_page_preview=True)
 
 async def on_start(app):
     print("✅ Bot polling started!", flush=True)
@@ -2169,10 +2438,20 @@ async def on_start(app):
             app.job_queue.run_repeating(_daily_backup, interval=timedelta(days=1),
                                         first=timedelta(minutes=5))
             logger.info("🗄 Автобэкап запланирован (раз в сутки)")
+            # Напоминание о зависших заявках — каждые 15 минут
+            app.job_queue.run_repeating(_check_stale_leads, interval=timedelta(minutes=15),
+                                        first=timedelta(minutes=2))
+            logger.info("⏰ Контроль зависших заявок запланирован (каждые 15 мин)")
+            # Контроль устаревших объявлений — раз в сутки
+            app.job_queue.run_repeating(_check_expired_pubs, interval=timedelta(days=1),
+                                        first=timedelta(minutes=10))
+            logger.info("🗓 Контроль устаревших объявлений запланирован (раз в сутки)")
         else:
-            logger.warning("⚠️ JobQueue недоступна — автобэкап только вручную /backup")
+            logger.warning("⚠️ JobQueue недоступна — автобэкап, напоминания и контроль "
+                           "срока работают только вручную. Установи "
+                           "python-telegram-bot[job-queue].")
     except Exception as e:
-        logger.error(f"schedule backup: {e}")
+        logger.error(f"schedule jobs: {e}")
 
 # ════════════════════════════════════════════════════════════
 # MAIN
@@ -2211,6 +2490,7 @@ def main():
     app.add_handler(CommandHandler("endchat", cmd_endchat))
     app.add_handler(CommandHandler("chats",   cmd_chats))
     app.add_handler(CommandHandler("backup",  cmd_backup))
+    app.add_handler(CommandHandler("ref",     cmd_ref))
     app.add_handler(CallbackQueryHandler(button_cb))
     app.add_handler(MessageHandler(
         filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
