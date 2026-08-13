@@ -36,7 +36,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import (
     Update, InputMediaPhoto, InputMediaVideo,
-    InlineKeyboardButton, InlineKeyboardMarkup
+    InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 )
 from telegram.ext import (
     Application, MessageHandler, CommandHandler,
@@ -55,6 +55,9 @@ BOT_USERNAME      = os.getenv('BOT_USERNAME', 'proauto_23_bot')
 TARGET_GROUP_ID   = int(os.getenv('TARGET_GROUP_ID', '0'))
 TARGET_CHANNEL    = os.getenv('TARGET_CHANNEL_NAME', '@proauto_77')
 MANAGER_LINK      = os.getenv('MANAGER_LINK', 'https://t.me/rdblm')
+# VK-автопостинг (необязательно). Если не заданы — VK просто отключён.
+VK_TOKEN          = os.getenv('VK_TOKEN', '')        # access_token сообщества
+VK_GROUP_ID       = os.getenv('VK_GROUP_ID', '')     # id сообщества (без минуса)
 OWNER_ID          = int(os.getenv('OWNER_ID', '0'))
 MANAGER_USER_ID   = int(os.getenv('MANAGER_USER_ID', '0'))
 PORT              = int(os.getenv('PORT', 3000))
@@ -135,7 +138,8 @@ DELETE_PHRASES = [
     r'^.*[Оо]тзывы\s+наших.*$',
     r'^.*CarVertical.*$',
     r'^.*[Рр]аботаем\s+официально.*$',
-    r'^.*[Нн]ужна\s+цена\s+под\s+ключ.*$',
+    r'^.*[Нн]ужна\s+цена.*$',
+    r'^.*[Цц]ена\s+домой.*$',
     r'^.*[Бб]ез\s+ДТП.*[Вв]ладелец.*$',
     r'^.*[Нн]е\s+аукцион.*$',
     r'^.*[Аа]укцион.*$',
@@ -625,10 +629,44 @@ def _db_init():
                     lead_id TEXT PRIMARY KEY,
                     data    TEXT NOT NULL
                 )""")
+            # ── CRM: сделки и журнал переходов ──────────────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS deals (
+                    deal_id    TEXT PRIMARY KEY,
+                    lead_id    TEXT,
+                    client_id  INTEGER,
+                    pub_id     TEXT,
+                    car        TEXT,
+                    stage      TEXT,
+                    amount     INTEGER DEFAULT 0,
+                    deposit    INTEGER DEFAULT 0,
+                    currency   TEXT DEFAULT '₽',
+                    manager_id INTEGER DEFAULT 0,
+                    source     TEXT,
+                    referred_by INTEGER DEFAULT 0,
+                    ref_rewarded INTEGER DEFAULT 0,
+                    created_at TEXT,
+                    updated_at TEXT
+                )""")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS deal_history (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    deal_id  TEXT,
+                    from_stage TEXT,
+                    to_stage   TEXT,
+                    note     TEXT,
+                    by_user  INTEGER,
+                    at       TEXT
+                )""")
+            # индекс для быстрого поиска сделок клиента и истории
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_deals_client ON deals(client_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_deals_lead ON deals(lead_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_deal ON deal_history(deal_id)")
             # Счётчики хранятся в meta, чтобы next_pub_id/next_lead_id
             # выдавали строго возрастающие номера без коллизий.
             conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('pub_counter',0)")
             conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('lead_counter',0)")
+            conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('deal_counter',0)")
             conn.commit()
         finally:
             conn.close()
@@ -927,6 +965,281 @@ def update_lead(lid, **changes):
         logger.error(f"update_lead {lid}: {e}")
         return None
 
+# ════════════════════════════════════════════════════════════
+# CRM: СДЕЛКИ (воронка, деньги, история)
+# ════════════════════════════════════════════════════════════
+
+# Фиксированная воронка этапов. Порядок важен (для перехода "далее"
+# и расчёта конверсии между соседними этапами).
+STAGES = [
+    ('new',     '🆕 Новая'),
+    ('contact', '📞 Связались'),
+    ('calc',    '🔍 Подбор/расчёт'),
+    ('deposit', '💰 Депозит внесён'),
+    ('transit', '🚚 Авто в пути'),
+    ('won',     '✅ Сделка закрыта'),
+    ('lost',    '❌ Отказ'),
+]
+STAGE_LABELS = dict(STAGES)
+STAGE_KEYS = [k for k, _ in STAGES]
+
+def _deal_row_to_dict(row):
+    if not row:
+        return None
+    return {k: row[k] for k in row.keys()}
+
+def next_deal_id():
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("UPDATE meta SET value=value+1 WHERE key='deal_counter'")
+            row = conn.execute("SELECT value FROM meta WHERE key='deal_counter'").fetchone()
+            conn.commit()
+            n = int(row['value'])
+        finally:
+            conn.close()
+    return f"D-{n:04d}"
+
+def create_deal(lead_id=None, client_id=0, pub_id=None, car='', source='',
+                referred_by=0):
+    """
+    Создаёт сделку в этапе 'new'. Анти-дубль: если для этого lead_id
+    сделка уже есть — возвращает её, не создавая вторую.
+    """
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                if lead_id:
+                    ex = conn.execute(
+                        "SELECT deal_id FROM deals WHERE lead_id=?", (lead_id,)).fetchone()
+                    if ex:
+                        return ex['deal_id']
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"create_deal dup-check: {e}")
+
+    did = next_deal_id()
+    now = datetime.now().isoformat()
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO deals(deal_id,lead_id,client_id,pub_id,car,stage,"
+                    "amount,deposit,currency,manager_id,source,referred_by,ref_rewarded,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,0,0,'₽',0,?,?,0,?,?)",
+                    (did, lead_id, client_id, pub_id, car[:200], 'new',
+                     source, referred_by, now, now))
+                conn.execute(
+                    "INSERT INTO deal_history(deal_id,from_stage,to_stage,note,by_user,at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (did, '', 'new', 'Сделка создана', client_id, now))
+                conn.commit()
+            finally:
+                conn.close()
+        logger.info(f"🤝 Сделка {did} создана | {car[:40]}")
+        return did
+    except Exception as e:
+        logger.error(f"create_deal: {e}")
+        return None
+
+def get_deal(deal_id):
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM deals WHERE deal_id=?", (deal_id,)).fetchone()
+                return _deal_row_to_dict(row)
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"get_deal {deal_id}: {e}")
+        return None
+
+def get_deal_history(deal_id):
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM deal_history WHERE deal_id=? ORDER BY id ASC",
+                    (deal_id,)).fetchall()
+                return [_deal_row_to_dict(r) for r in rows]
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"get_deal_history {deal_id}: {e}")
+        return []
+
+def list_deals(stage=None, manager_id=None, limit=50):
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                q = "SELECT * FROM deals"
+                cond, params = [], []
+                if stage:
+                    cond.append("stage=?"); params.append(stage)
+                if manager_id:
+                    cond.append("manager_id=?"); params.append(manager_id)
+                if cond:
+                    q += " WHERE " + " AND ".join(cond)
+                q += " ORDER BY updated_at DESC LIMIT ?"; params.append(limit)
+                rows = conn.execute(q, params).fetchall()
+                return [_deal_row_to_dict(r) for r in rows]
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"list_deals: {e}")
+        return []
+
+def set_stage(deal_id, to_stage, by_user=0, note=''):
+    """Меняет этап сделки. to_stage обязан быть валидным. Пишет историю."""
+    if to_stage not in STAGE_KEYS:
+        logger.error(f"set_stage: недопустимый этап {to_stage}")
+        return None
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                row = conn.execute(
+                    "SELECT stage FROM deals WHERE deal_id=?", (deal_id,)).fetchone()
+                if not row:
+                    return None
+                cur = row['stage']
+                now = datetime.now().isoformat()
+                # тот же этап — не плодим пустую запись
+                if cur == to_stage and not note:
+                    r2 = conn.execute("SELECT * FROM deals WHERE deal_id=?",
+                                      (deal_id,)).fetchone()
+                    return _deal_row_to_dict(r2)
+                conn.execute(
+                    "UPDATE deals SET stage=?, updated_at=? WHERE deal_id=?",
+                    (to_stage, now, deal_id))
+                conn.execute(
+                    "INSERT INTO deal_history(deal_id,from_stage,to_stage,note,by_user,at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (deal_id, cur, to_stage, note or '', by_user, now))
+                conn.commit()
+                r2 = conn.execute("SELECT * FROM deals WHERE deal_id=?",
+                                  (deal_id,)).fetchone()
+                return _deal_row_to_dict(r2)
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"set_stage {deal_id}: {e}")
+        return None
+
+def set_money(deal_id, amount=None, deposit=None, currency=None, by_user=0):
+    """Частично обновляет деньги сделки. Пишет историю."""
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                row = conn.execute("SELECT * FROM deals WHERE deal_id=?",
+                                   (deal_id,)).fetchone()
+                if not row:
+                    return None
+                now = datetime.now().isoformat()
+                new_amount = amount if amount is not None else row['amount']
+                new_deposit = deposit if deposit is not None else row['deposit']
+                new_cur = currency if currency else row['currency']
+                conn.execute(
+                    "UPDATE deals SET amount=?, deposit=?, currency=?, updated_at=? "
+                    "WHERE deal_id=?",
+                    (int(new_amount), int(new_deposit), new_cur, now, deal_id))
+                parts = []
+                if amount is not None:  parts.append(f"сумма {int(new_amount):,}{new_cur}".replace(',', ' '))
+                if deposit is not None: parts.append(f"депозит {int(new_deposit):,}{new_cur}".replace(',', ' '))
+                note = "Деньги: " + ", ".join(parts) if parts else "Обновление денег"
+                conn.execute(
+                    "INSERT INTO deal_history(deal_id,from_stage,to_stage,note,by_user,at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (deal_id, row['stage'], row['stage'], note, by_user, now))
+                conn.commit()
+                r2 = conn.execute("SELECT * FROM deals WHERE deal_id=?",
+                                  (deal_id,)).fetchone()
+                return _deal_row_to_dict(r2)
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"set_money {deal_id}: {e}")
+        return None
+
+def assign_manager(deal_id, manager_id, by_user=0):
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                row = conn.execute("SELECT stage FROM deals WHERE deal_id=?",
+                                   (deal_id,)).fetchone()
+                if not row:
+                    return None
+                now = datetime.now().isoformat()
+                conn.execute("UPDATE deals SET manager_id=?, updated_at=? WHERE deal_id=?",
+                             (int(manager_id), now, deal_id))
+                conn.execute(
+                    "INSERT INTO deal_history(deal_id,from_stage,to_stage,note,by_user,at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (deal_id, row['stage'], row['stage'],
+                     f"Назначен менеджер {manager_id}", by_user, now))
+                conn.commit()
+                r2 = conn.execute("SELECT * FROM deals WHERE deal_id=?",
+                                  (deal_id,)).fetchone()
+                return _deal_row_to_dict(r2)
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"assign_manager {deal_id}: {e}")
+        return None
+
+def mark_ref_rewarded(deal_id):
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                conn.execute("UPDATE deals SET ref_rewarded=1 WHERE deal_id=?", (deal_id,))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"mark_ref_rewarded {deal_id}: {e}")
+
+def get_client_deals(client_id):
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM deals WHERE client_id=? ORDER BY updated_at DESC",
+                    (int(client_id),)).fetchall()
+                return [_deal_row_to_dict(r) for r in rows]
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"get_client_deals {client_id}: {e}")
+        return []
+
+def funnel_stats():
+    """Считает кол-во сделок по этапам + конверсию между соседними этапами."""
+    counts = {k: 0 for k in STAGE_KEYS}
+    try:
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                rows = conn.execute("SELECT stage, COUNT(*) c FROM deals GROUP BY stage").fetchall()
+                for r in rows:
+                    if r['stage'] in counts:
+                        counts[r['stage']] = r['c']
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"funnel_stats: {e}")
+    return counts
+
 def get_state(uid):
     if uid not in BRIEF_STATES:
         BRIEF_STATES[uid] = {'step':None,'data':{}}
@@ -975,7 +1288,10 @@ def clean(text):
     text = re.sub(r'^.*[Рр]оман[^\n]*\n?','',text,flags=re.M)
     # Контакты
     text = re.sub(r'@[A-Za-z0-9_]+','',text)
+    # Markdown-ссылки вида [текст](tel:+7...) и [текст](url) — убираем целиком
+    text = re.sub(r'\[[^\]]*\]\((?:tel:|https?://|tg://)[^)]*\)','',text)
     text = re.sub(r'https?://[^\s]+','',text)
+    text = re.sub(r'tel:\+?[\d\s\-()]+','',text)
     # Номера телефонов (цены уже спрятаны выше, так что этот шаг
     # больше не может случайно съесть цифры цены)
     text = re.sub(r'\+?\d[\d\s\-()]{6,}\d','',text)
@@ -1144,7 +1460,45 @@ def hashtags(text):
 
     return ' '.join(tags[:2] + ['#авточастно', '#автоподзаказ', '#АвтоНаЗаказ', '#ProAuto77'])
 
-def format_post(original, pub_id, pub_link):
+def _shrink_for_caption(text, limit=1024):
+    """
+    Telegram ограничивает подпись к фото/видео 1024 символами.
+    Если пост длиннее — сокращаем самую длинную строку (обычно
+    «Комплектация: ...» с перечислением опций), сохраняя марку,
+    характеристики, цену, футер и хештеги. Это спасает объявления
+    с очень длинным списком оснащения, которые иначе НЕ публикуются.
+    """
+    if len(text) <= limit:
+        return text
+    lines = text.split('\n')
+    # находим самую длинную строку-кандидат (комплектация/оснащение/опции)
+    idx_longest = -1
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if ('комплектац' in low or 'оснащен' in low or 'опци' in low
+                or len(ln) > 200):
+            if idx_longest == -1 or len(ln) > len(lines[idx_longest]):
+                idx_longest = i
+    if idx_longest == -1:
+        # нет явной длинной строки — просто режем весь текст по границе слова
+        cut = text[:limit-1].rsplit(' ', 1)[0]
+        return cut + "…"
+    # сокращаем найденную строку так, чтобы весь пост влез в лimit
+    overflow = len(text) - limit + 20  # запас на "…и другое"
+    long_line = lines[idx_longest]
+    if len(long_line) > overflow + 40:
+        keep = len(long_line) - overflow
+        shortened = long_line[:keep].rsplit(',', 1)[0].rstrip(' ,') + " …и другое"
+        lines[idx_longest] = shortened
+        result = '\n'.join(lines)
+        if len(result) <= limit:
+            return result
+    # если всё ещё длинно — жёстко режем по границе слова
+    joined = '\n'.join(lines)
+    cut = joined[:limit-1].rsplit(' ', 1)[0]
+    return cut + "…"
+
+def format_post(original, pub_id, pub_link, for_media=False):
     if not original: return None
     logger.info(f"🔧 {pub_id}")
     t = clean(original)
@@ -1159,7 +1513,11 @@ def format_post(original, pub_id, pub_link):
     t = insert_id(t, pub_id, pub_link)
     ht = hashtags(original)
     footer = build_footer(t, pub_id)
-    return "Прямая продажа ✅\n\n" + t + footer + (f"\n\n{ht}" if ht else "")
+    post = "Прямая продажа ✅\n\n" + t + footer + (f"\n\n{ht}" if ht else "")
+    # Если пост пойдёт как подпись к фото/видео — ужимаем под лимит 1024
+    if for_media:
+        post = _shrink_for_caption(post, 1024)
+    return post
 
 # ════════════════════════════════════════════════════════════
 # ПУБЛИКАЦИЯ
@@ -1186,6 +1544,54 @@ def orig_link(info):
 
 def pub_link(msg_id):
     return f"https://t.me/{TARGET_CHANNEL.replace('@','')}/{msg_id}"
+
+def _html_to_vk(text):
+    """
+    VK не понимает HTML-разметку Telegram. Убираем теги, ссылки
+    превращаем в «текст (url)», чтобы пост читался нормально.
+    """
+    # <a href="url">текст</a> → текст
+    text = re.sub(r'<a\s+href="[^"]*">([^<]*)</a>', r'\1', text)
+    # остальные теги (<b>, </b> и т.п.) просто снимаем
+    text = re.sub(r'</?[a-zA-Z][^>]*>', '', text)
+    return text.strip()
+
+async def post_to_vk(caption):
+    """
+    Публикует пост в VK-сообщество через API wall.post.
+    Работает только если заданы VK_TOKEN и VK_GROUP_ID.
+    Фото пока не прикрепляем (это отдельный многошаговый flow VK API);
+    постим текст со ссылкой на Telegram-канал — как второй канал охвата.
+    Возвращает True при успехе.
+    """
+    if not VK_TOKEN or not VK_GROUP_ID:
+        return False
+    try:
+        import urllib.request, urllib.parse
+        vk_text = _html_to_vk(caption)
+        params = {
+            'owner_id': f'-{VK_GROUP_ID}',   # минус = сообщество
+            'from_group': 1,
+            'message': vk_text,
+            'access_token': VK_TOKEN,
+            'v': '5.199',
+        }
+        data = urllib.parse.urlencode(params).encode('utf-8')
+        req = urllib.request.Request('https://api.vk.com/method/wall.post', data=data)
+        loop = asyncio.get_event_loop()
+        def _do():
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.read().decode('utf-8')
+        raw = await loop.run_in_executor(None, _do)
+        res = json.loads(raw)
+        if 'response' in res:
+            logger.info(f"🟦 Опубликовано в VK: post {res['response'].get('post_id')}")
+            return True
+        logger.error(f"VK ошибка: {res}")
+        return False
+    except Exception as e:
+        logger.error(f"post_to_vk: {e}")
+        return False
 
 def is_valid(text, has_media):
     if not has_media: return False, "нет медиа"
@@ -1221,7 +1627,8 @@ async def publish(update, context, info):
 
     pid = next_pub_id()
     sl  = orig_link(info) if info else None
-    fmt = format_post(text, pid, None)
+    # с медиа подпись ограничена 1024 символами → for_media=True
+    fmt = format_post(text, pid, None, for_media=(hp or hv))
     if not fmt: return
 
     try:
@@ -1239,7 +1646,7 @@ async def publish(update, context, info):
 
         pmid = sent.message_id
         pl   = pub_link(pmid)
-        new  = format_post(text, pid, pl)
+        new  = format_post(text, pid, pl, for_media=(hp or hv))
         try:
             if hp or hv:
                 await context.bot.edit_message_caption(
@@ -1257,6 +1664,12 @@ async def publish(update, context, info):
                  original_caption=text,
                  telegram_link=pl)
         logger.info(f"✅ {pid}")
+        # Мультиканал: дублируем в VK (если настроен). Не блокирует и
+        # не роняет основную публикацию при сбое VK.
+        try:
+            await post_to_vk(new)
+        except Exception as e:
+            logger.error(f"VK repost: {e}")
     except Exception as e:
         logger.error(f"❌ publish: {e}")
 
@@ -1270,7 +1683,7 @@ async def _album(mgid, context):
     if not ok: del media_cache[mgid]; return
     pid = next_pub_id()
     sl  = orig_link(info) if info else None
-    fmt = format_post(caption, pid, None)
+    fmt = format_post(caption, pid, None, for_media=True)
     if not fmt: del media_cache[mgid]; return
     try:
         # Каждый элемент альбома — (тип, file_id). Раньше все элементы
@@ -1290,7 +1703,7 @@ async def _album(mgid, context):
         pmid = sent[0].message_id if sent else None
         if pmid:
             pl  = pub_link(pmid)
-            new = format_post(caption, pid, pl)
+            new = format_post(caption, pid, pl, for_media=True)
             try:
                 await context.bot.edit_message_caption(
                     chat_id=TARGET_GROUP_ID, message_id=pmid,
@@ -1311,7 +1724,7 @@ async def _album(mgid, context):
 # УВЕДОМЛЕНИЕ МЕНЕДЖЕРУ
 # ════════════════════════════════════════════════════════════
 
-async def notify_manager(context, lid, data):
+async def notify_manager(context, lid, data, deal_id=None):
     """
     Уведомление менеджеру о новой заявке.
     Ссылка на клиента:
@@ -1388,14 +1801,26 @@ async def notify_manager(context, lid, data):
         rows.append([InlineKeyboardButton(
             "🔗 Оригинал объявления", url=pub['source_link']
         )])
-    # ── Кнопки статуса заявки (мини-CRM) ───────────────────
-    # Меняют статус в один тап: новая → в работе → сделка/отказ.
-    # /stats потом считает по этим статусам реальную конверсию.
-    rows.append([
-        InlineKeyboardButton("🔄 В работу", callback_data=f"st_{lid}_work"),
-        InlineKeyboardButton("✅ Сделка",   callback_data=f"st_{lid}_deal"),
-        InlineKeyboardButton("❌ Отказ",    callback_data=f"st_{lid}_lost"),
-    ])
+    # ── Кнопки этапов сделки (CRM) ─────────────────────────
+    # Переводят сделку по воронке в один тап. Каждый переход
+    # пишется в историю сделки и отражается в /funnel.
+    if deal_id:
+        text += f"\n🤝 Сделка: <b>{deal_id}</b>\n"
+        rows.append([
+            InlineKeyboardButton("📞 Связались", callback_data=f"stg_{deal_id}_contact"),
+            InlineKeyboardButton("🔍 Расчёт",    callback_data=f"stg_{deal_id}_calc"),
+        ])
+        rows.append([
+            InlineKeyboardButton("💰 Депозит",   callback_data=f"stg_{deal_id}_deposit"),
+            InlineKeyboardButton("🚚 В пути",    callback_data=f"stg_{deal_id}_transit"),
+        ])
+        rows.append([
+            InlineKeyboardButton("✅ Сделка",    callback_data=f"stg_{deal_id}_won"),
+            InlineKeyboardButton("❌ Отказ",     callback_data=f"stg_{deal_id}_lost"),
+        ])
+        rows.append([
+            InlineKeyboardButton("📋 Карточка сделки", callback_data=f"card_{deal_id}"),
+        ])
     kb = InlineKeyboardMarkup(rows)
 
     # ── Отправляем владельцу и менеджеру ───────────────────
@@ -1438,6 +1863,19 @@ async def finalize(update, context, uid):
     }
     save_lead(lid, ld)
 
+    # ── CRM: создаём сделку для этой заявки ──────────────────
+    car_txt = (data.get('car_model')
+               or f"{data.get('brand','')} {data.get('model','')}".strip()
+               or 'Авто на заказ')
+    deal_id = create_deal(
+        lead_id=lid,
+        client_id=uid,
+        pub_id=data.get('pub_id'),
+        car=car_txt,
+        source=data.get('lead_source', ''),
+        referred_by=data.get('referred_by', 0) or 0,
+    )
+
     itype = data.get('interest_type','')
     if itype == 'consultation':
         msg = (f"✅ <b>Спасибо! Заявка #{lid} принята</b>\n\n"
@@ -1470,7 +1908,7 @@ async def finalize(update, context, uid):
         chat_id=update.effective_chat.id,
         text=msg, parse_mode='HTML',
         disable_web_page_preview=True)
-    await notify_manager(context, lid, ld)
+    await notify_manager(context, lid, ld, deal_id=deal_id)
     clear_state(uid)
 
 # ════════════════════════════════════════════════════════════
@@ -1502,6 +1940,53 @@ async def button_cb(update, context):
     st  = get_state(uid)
     logger.info(f"🔘 {uid}: {d[:50]}")
 
+    # ── МЕНЮ МЕНЕДЖЕРА (кнопки панели управления) ────────────
+    if d.startswith("menu_"):
+        if not has_rights(uid):
+            await q.answer("Недостаточно прав")
+            return
+        action = d[5:]
+        # Лёгкий адаптер: даём командам объект с message.reply_text,
+        # ведущим в тот же чат, и context.args.
+        class _Msg:
+            def __init__(self, chat_id, bot):
+                self._chat_id = chat_id; self._bot = bot
+                self.text = ''
+            async def reply_text(self, *a, **k):
+                k.pop('reply_markup', None)
+                text = a[0] if a else k.pop('text', '')
+                await self._bot.send_message(chat_id=self._chat_id, text=text,
+                                             **{kk: vv for kk, vv in k.items()
+                                                if kk in ('parse_mode', 'disable_web_page_preview')})
+        class _Upd:
+            def __init__(self, orig, bot):
+                self.effective_user = orig.from_user
+                self.effective_chat = orig.message.chat
+                self.message = _Msg(orig.message.chat.id, bot)
+        class _Ctx:
+            def __init__(self, bot, args=None):
+                self.bot = bot; self.args = args or []
+        fake_upd = _Upd(q, context.bot)
+        if action == "stats":
+            await cmd_stats(fake_upd, _Ctx(context.bot))
+        elif action == "funnel":
+            await cmd_funnel(fake_upd, _Ctx(context.bot))
+        elif action == "deals":
+            await cmd_deals(fake_upd, _Ctx(context.bot))
+        elif action == "leads":
+            await cmd_leads(fake_upd, _Ctx(context.bot))
+        elif action == "backup":
+            await cmd_backup(fake_upd, _Ctx(context.bot))
+        elif action == "export_help":
+            await context.bot.send_message(
+                chat_id=q.message.chat.id,
+                text=("📤 <b>Экспорт для площадок</b>\n\n"
+                      "Команда: <code>/export id_XXXX</code>\n"
+                      "Пришлёт готовые тексты для Авито и VK по конкретному "
+                      "объявлению.\n\nID берётся из опубликованного поста (id_0001 и т.п.)"),
+                parse_mode='HTML')
+        return
+
     # ── КОНКРЕТНОЕ АВТО ──────────────────────────────────────
     if d.startswith("yes_"):
         pid = d[4:]
@@ -1520,7 +2005,10 @@ async def button_cb(update, context):
                         break
                 if cm: break
         cm = cm or 'автомобиль'
+        _src = st['data'].get('lead_source'); _ref = st['data'].get('referred_by')
         st['data'] = {'pub_id':pid,'car_model':cm,'interest_type':'specific_car'}
+        if _src: st['data']['lead_source'] = _src
+        if _ref: st['data']['referred_by'] = _ref
         await q.edit_message_text(f"🚗 {cm}", parse_mode='HTML')
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -1559,7 +2047,10 @@ async def button_cb(update, context):
 
     # ── ИНДИВИДУАЛЬНЫЙ ЗАКАЗ ─────────────────────────────────
     if d == "custom":
+        _src = st['data'].get('lead_source'); _ref = st['data'].get('referred_by')
         st['data'] = {'interest_type':'custom'}
+        if _src: st['data']['lead_source'] = _src
+        if _ref: st['data']['referred_by'] = _ref
         kb = [[InlineKeyboardButton(g, callback_data=f"bg_{i}")]
               for i,g in enumerate(BRAND_GROUPS.keys())]
         kb.append([InlineKeyboardButton("🤔 Любая марка", callback_data="bg_any")])
@@ -1700,65 +2191,84 @@ async def button_cb(update, context):
         await finalize(update, context, uid)
         return
 
-    # ── СТАТУС ЗАЯВКИ (мини-CRM) ────────────────────────────
-    # callback: st_{lead_id}_{status}. lead_id сам содержит "_"
-    # (lead_00017), поэтому статус берём как последний сегмент,
-    # а lead_id — всё, что между "st_" и последним "_".
-    if d.startswith("st_"):
+    # ── СМЕНА ЭТАПА СДЕЛКИ (CRM) ────────────────────────────
+    # callback: stg_{deal_id}_{stage}. deal_id = "D-0042" (без "_"),
+    # stage — последний сегмент. Разбираем с конца на всякий случай.
+    if d.startswith("stg_"):
         try:
-            body = d[3:]                    # "lead_00017_deal"
-            status = body.rsplit("_", 1)[1] # "deal"
-            lid    = body.rsplit("_", 1)[0] # "lead_00017"
-            labels = {'work':'🔄 В работе', 'deal':'✅ Сделка', 'lost':'❌ Отказ'}
-            rec = update_lead(lid, status=status,
-                              status_at=datetime.now().isoformat(),
-                              status_by=uid)
+            body = d[4:]                     # "D-0042_deposit"
+            to_stage = body.rsplit("_", 1)[1]
+            deal_id  = body.rsplit("_", 1)[0]
+            rec = set_stage(deal_id, to_stage, by_user=uid)
             if not rec:
-                await q.answer("Заявка не найдена")
+                await q.answer("Сделка не найдена или этап неверный")
                 return
-            await q.answer(f"Статус: {labels.get(status, status)}")
+            await q.answer(f"Этап: {STAGE_LABELS.get(to_stage, to_stage)}")
 
-            # Реферальный бонус: если сделка закрыта и клиента кто-то
-            # привёл (referred_by) — уведомляем пригласившего.
-            if status == 'deal' and rec.get('referred_by') and not rec.get('ref_rewarded'):
+            # Синхронизируем "старое" поле статуса заявки для /stats-воронки
+            if rec.get('lead_id'):
+                _map = {'won':'deal','lost':'lost','new':'new'}
+                update_lead(rec['lead_id'],
+                            status=_map.get(to_stage, 'work'))
+
+            # Реферальный бонус при закрытии сделки (этап 'won')
+            if to_stage == 'won' and rec.get('referred_by') and not rec.get('ref_rewarded'):
                 referrer = rec['referred_by']
                 try:
-                    car = rec.get('car_model') or 'авто'
+                    car = rec.get('car') or 'авто'
                     await context.bot.send_message(
                         chat_id=referrer,
                         text=(f"🎉 <b>Ваш реферальный бонус!</b>\n\n"
                               f"Приглашённый вами человек оформил покупку ({car}).\n"
                               f"Свяжитесь с менеджером ProAuto для получения бонуса. 🎁"),
                         parse_mode='HTML')
-                    update_lead(lid, ref_rewarded=True)
-                    # и владельцу — напоминание выдать бонус
+                    mark_ref_rewarded(deal_id)
                     if OWNER_ID:
                         await context.bot.send_message(
                             chat_id=OWNER_ID,
                             text=(f"🎁 Реферальный бонус к выдаче!\n"
                                   f"Пригласивший: <code>{referrer}</code>\n"
-                                  f"Заявка: {lid}"),
+                                  f"Сделка: {deal_id}"),
                             parse_mode='HTML')
                 except Exception as e:
-                    logger.error(f"ref reward {lid}: {e}")
+                    logger.error(f"ref reward {deal_id}: {e}")
 
+            # Дописываем текущий этап под сообщением
             try:
                 base = q.message.text_html if q.message.text else (q.message.caption_html or "")
             except Exception:
                 base = q.message.text or ""
-            new_text = f"{base}\n\n<b>Статус:</b> {labels.get(status, status)}"
+            new_text = f"{base}\n\n<b>Этап:</b> {STAGE_LABELS.get(to_stage, to_stage)}"
             try:
                 if q.message.text:
                     await q.edit_message_text(new_text, parse_mode='HTML',
+                                              reply_markup=q.message.reply_markup,
                                               disable_web_page_preview=True)
                 else:
-                    await q.edit_message_caption(new_text, parse_mode='HTML')
+                    await q.edit_message_caption(new_text, parse_mode='HTML',
+                                                 reply_markup=q.message.reply_markup)
             except Exception:
-                try: await q.edit_message_reply_markup(reply_markup=None)
-                except Exception: pass
+                pass
         except Exception as e:
-            logger.error(f"st_: {e}")
-            await q.answer("Ошибка смены статуса")
+            logger.error(f"stg_: {e}")
+            await q.answer("Ошибка смены этапа")
+        return
+
+    # ── КАРТОЧКА СДЕЛКИ (CRM) ───────────────────────────────
+    if d.startswith("card_"):
+        try:
+            deal_id = d[5:]
+            if not has_rights(uid):
+                await q.answer("Недостаточно прав")
+                return
+            await q.answer()
+            await context.bot.send_message(
+                chat_id=q.from_user.id,
+                text=_render_deal_card(deal_id),
+                parse_mode='HTML',
+                disable_web_page_preview=True)
+        except Exception as e:
+            logger.error(f"card_: {e}")
         return
 
     # ── НАПИСАТЬ КЛИЕНТУ (кнопка из уведомления) ────────────
@@ -1961,11 +2471,17 @@ async def cmd_start(update, context):
                         break
                 if cm: break
         cm = cm or 'автомобиль'
-        _prev_src = get_state(uid)['data'].get('lead_source')
+        # Сохраняем метку источника И реферера при перезаписи данных —
+        # иначе привязка к пригласившему терялась при клике на конкретное авто.
+        _prev = get_state(uid)['data']
+        _prev_src = _prev.get('lead_source')
+        _prev_ref = _prev.get('referred_by')
         get_state(uid)['data'] = {
             'pub_id':pid,'car_model':cm,'interest_type':'specific_car'}
         if _prev_src:
             get_state(uid)['data']['lead_source'] = _prev_src
+        if _prev_ref:
+            get_state(uid)['data']['referred_by'] = _prev_ref
 
         kb = [
             [InlineKeyboardButton(f"✅ {cm[:45]}",  callback_data=f"yes_{pid}")],
@@ -1979,15 +2495,21 @@ async def cmd_start(update, context):
         return
 
     if has_rights(uid):
+        kb = [
+            [InlineKeyboardButton("📊 Статистика", callback_data="menu_stats"),
+             InlineKeyboardButton("🎯 Воронка",   callback_data="menu_funnel")],
+            [InlineKeyboardButton("🤝 Сделки",     callback_data="menu_deals"),
+             InlineKeyboardButton("📋 Заявки",     callback_data="menu_leads")],
+            [InlineKeyboardButton("📤 Экспорт для площадок", callback_data="menu_export_help")],
+            [InlineKeyboardButton("🗄 Бэкап базы", callback_data="menu_backup")],
+        ]
         await update.message.reply_text(
             f"🚀 <b>PROAUTO BOT — Панель управления</b>\n\n"
             f"📤 Пересылай объявления → публикую в {TARGET_CHANNEL}\n"
-            f"📹 Фото и видео — оба работают\n"
-            f"📦 Альбомы — работают\n\n"
-            f"<b>Команды:</b>\n"
-            f"📊 /stats — статистика\n"
-            f"📋 /leads — последние заявки\n"
-            f"📤 /export id_XXXX — тексты для площадок",
+            f"📹 Фото, видео, альбомы — работают\n\n"
+            f"Выбери раздел кнопкой ниже 👇\n"
+            f"<i>(или командой: /stats /funnel /deals /leads /export /backup)</i>",
+            reply_markup=InlineKeyboardMarkup(kb),
             parse_mode='HTML')
         return
 
@@ -2419,6 +2941,173 @@ async def cmd_ref(update, context):
         f"вы получите бонус. Чем больше друзей — тем больше бонусов! 🚗",
         parse_mode='HTML', disable_web_page_preview=True)
 
+# ════════════════════════════════════════════════════════════
+# CRM: КОМАНДЫ (сделки, клиенты, воронка)
+# ════════════════════════════════════════════════════════════
+
+def _fmt_money(n, cur='₽'):
+    try:
+        return f"{int(n):,}".replace(',', ' ') + cur
+    except Exception:
+        return f"{n}{cur}"
+
+def _render_deal_card(deal_id):
+    """Формирует текст карточки сделки со всеми полями и историей."""
+    d = get_deal(deal_id)
+    if not d:
+        return f"❌ Сделка {deal_id} не найдена"
+    hist = get_deal_history(deal_id)
+    cur = d.get('currency', '₽')
+    amount = d.get('amount', 0) or 0
+    deposit = d.get('deposit', 0) or 0
+    remain = amount - deposit
+    lines = [f"📋 <b>Сделка {d['deal_id']}</b>", ""]
+    lines.append(f"🚗 {d.get('car') or '—'}")
+    if d.get('pub_id'):
+        lines.append(f"🔖 Объявление: {d['pub_id']}")
+    lines.append(f"👤 Клиент: <code>{d.get('client_id')}</code>")
+    lines.append(f"📊 Этап: <b>{STAGE_LABELS.get(d.get('stage'), d.get('stage'))}</b>")
+    if amount or deposit:
+        lines.append("")
+        lines.append(f"💵 Сумма: {_fmt_money(amount, cur)}")
+        lines.append(f"💰 Депозит: {_fmt_money(deposit, cur)}")
+        lines.append(f"⏳ Остаток: {_fmt_money(remain, cur)}")
+    if d.get('manager_id'):
+        lines.append(f"👔 Менеджер: <code>{d['manager_id']}</code>")
+    if d.get('source'):
+        lines.append(f"📡 Источник: {d['source']}")
+    # История
+    if hist:
+        lines.append("")
+        lines.append("<b>История:</b>")
+        for h in hist[-12:]:
+            try:
+                t = datetime.fromisoformat(h['at']).strftime('%d.%m %H:%M')
+            except Exception:
+                t = '?'
+            arrow = ''
+            if h['to_stage'] and h['from_stage'] != h['to_stage']:
+                arrow = f"{STAGE_LABELS.get(h['from_stage'], h['from_stage'] or '—')} → {STAGE_LABELS.get(h['to_stage'], h['to_stage'])}"
+            note = f" · {h['note']}" if h.get('note') else ""
+            lines.append(f"  {t} {arrow}{note}")
+    return "\n".join(lines)
+
+async def cmd_deals(update, context):
+    """/deals [этап] — список активных сделок (или по этапу)."""
+    if not has_rights(update.effective_user.id):
+        return
+    args = context.args
+    stage = args[0] if args and args[0] in STAGE_KEYS else None
+    if stage:
+        deals = list_deals(stage=stage, limit=30)
+        title = f"📋 <b>Сделки: {STAGE_LABELS.get(stage, stage)}</b>\n\n"
+    else:
+        # активные = все, кроме закрытых/отказов
+        deals = [d for d in list_deals(limit=60)
+                 if d.get('stage') not in ('won', 'lost')][:30]
+        title = "📋 <b>Активные сделки</b>\n\n"
+    if not deals:
+        await update.message.reply_text(title + "Пусто.", parse_mode='HTML')
+        return
+    text = title
+    for d in deals:
+        cur = d.get('currency', '₽')
+        money = f" · {_fmt_money(d.get('amount',0), cur)}" if d.get('amount') else ""
+        text += (f"{STAGE_LABELS.get(d.get('stage'),'')[:2]} <b>{d['deal_id']}</b> — "
+                 f"{(d.get('car') or '')[:35]}{money}\n"
+                 f"    /deal_{d['deal_id'].replace('-','_')}\n")
+    text += "\nПодробно: /deal D-XXXX  |  Воронка: /funnel"
+    if len(text) > 4000:
+        text = text[:3950] + "..."
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def cmd_deal(update, context):
+    """/deal D-0042 или /deal_D_0042 — карточка сделки с кнопками."""
+    if not has_rights(update.effective_user.id):
+        return
+    # поддержка обоих форматов: "/deal D-0042" и "/deal_D_0042"
+    txt = (update.message.text or '').strip()
+    deal_id = None
+    if context.args:
+        deal_id = context.args[0]
+    else:
+        m = re.search(r'D[-_](\d{4})', txt)
+        if m:
+            deal_id = f"D-{m.group(1)}"
+    if not deal_id:
+        await update.message.reply_text("Использование: /deal D-0042", parse_mode='HTML')
+        return
+    deal_id = deal_id.replace('_', '-')
+    d = get_deal(deal_id)
+    if not d:
+        await update.message.reply_text(f"❌ Сделка {deal_id} не найдена")
+        return
+    # кнопки этапов + деньги
+    rows = [
+        [InlineKeyboardButton("📞 Связались", callback_data=f"stg_{deal_id}_contact"),
+         InlineKeyboardButton("🔍 Расчёт",    callback_data=f"stg_{deal_id}_calc")],
+        [InlineKeyboardButton("💰 Депозит",   callback_data=f"stg_{deal_id}_deposit"),
+         InlineKeyboardButton("🚚 В пути",    callback_data=f"stg_{deal_id}_transit")],
+        [InlineKeyboardButton("✅ Сделка",    callback_data=f"stg_{deal_id}_won"),
+         InlineKeyboardButton("❌ Отказ",     callback_data=f"stg_{deal_id}_lost")],
+    ]
+    await update.message.reply_text(
+        _render_deal_card(deal_id),
+        parse_mode='HTML', disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(rows))
+
+async def cmd_client(update, context):
+    """/client 12345 — карточка клиента со всеми его сделками."""
+    if not has_rights(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /client 12345 (Telegram ID)")
+        return
+    try:
+        cid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID клиента должен быть числом")
+        return
+    deals = get_client_deals(cid)
+    if not deals:
+        await update.message.reply_text(f"У клиента <code>{cid}</code> сделок нет.",
+                                         parse_mode='HTML')
+        return
+    won = sum(1 for d in deals if d.get('stage') == 'won')
+    active = sum(1 for d in deals if d.get('stage') not in ('won', 'lost'))
+    text = (f"👤 <b>Клиент</b> <code>{cid}</code>\n\n"
+            f"Сделок всего: {len(deals)} (✅ {won} закрыто, 🔄 {active} в работе)\n\n")
+    for d in deals[:20]:
+        text += (f"{STAGE_LABELS.get(d.get('stage'),'')[:2]} <b>{d['deal_id']}</b> — "
+                 f"{(d.get('car') or '')[:35]}\n")
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def cmd_funnel(update, context):
+    """/funnel — воронка сделок с конверсией между этапами."""
+    if not has_rights(update.effective_user.id):
+        return
+    f = funnel_stats()
+    # активные этапы по порядку (без lost) для конверсии
+    flow = ['new', 'contact', 'calc', 'deposit', 'transit', 'won']
+    text = "🎯 <b>ВОРОНКА СДЕЛОК</b>\n\n"
+    for k in flow:
+        text += f"{STAGE_LABELS[k]}: <b>{f.get(k,0)}</b>\n"
+    text += f"{STAGE_LABELS['lost']}: <b>{f.get('lost',0)}</b>\n\n"
+    # конверсия между соседними этапами
+    text += "<b>Конверсия между этапами:</b>\n"
+    for i in range(len(flow) - 1):
+        a, b = flow[i], flow[i+1]
+        ca, cb = f.get(a, 0), f.get(b, 0)
+        # клиенты, дошедшие до этапа b и дальше
+        reached_b = sum(f.get(x, 0) for x in flow[i+1:])
+        reached_a = sum(f.get(x, 0) for x in flow[i:])
+        conv = round(reached_b / max(reached_a, 1) * 100, 1)
+        text += f"  {STAGE_LABELS[a]} → {STAGE_LABELS[b]}: {conv}%\n"
+    total = sum(f.get(x, 0) for x in flow)
+    won = f.get('won', 0)
+    text += f"\n📈 Итоговая конверсия в сделку: {round(won/max(total,1)*100,1)}%"
+    await update.message.reply_text(text, parse_mode='HTML')
+
 async def on_start(app):
     print("✅ Bot polling started!", flush=True)
     brands_count = len(CAR_DATABASE)
@@ -2430,6 +3119,38 @@ async def on_start(app):
     logger.info(
         "💰 Наценки: <5млн +40k | 5-7 +80k | 7-10 +100k | "
         "10-15 +180k | 15-20 +250k | 20-25 +350k | 25-30 +500k | 30+ +1млн | EUR/USD +1000")
+
+    # Постоянное командное меню (синяя кнопка Menu в клиенте Telegram).
+    # Показываем клиентский набор всем; полный набор владелец/менеджер
+    # и так знает и видит в панели /start.
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("start", "🚗 Начать / подобрать авто"),
+            BotCommand("ref",   "🎁 Моя реферальная ссылка"),
+        ])
+        # Расширенное меню для владельца и менеджера — в их личных чатах
+        from telegram import BotCommandScopeChat
+        admin_cmds = [
+            BotCommand("start",  "🚀 Панель управления"),
+            BotCommand("stats",  "📊 Статистика"),
+            BotCommand("funnel", "🎯 Воронка сделок"),
+            BotCommand("deals",  "🤝 Активные сделки"),
+            BotCommand("leads",  "📋 Последние заявки"),
+            BotCommand("export", "📤 Экспорт для площадок"),
+            BotCommand("backup", "🗄 Бэкап базы"),
+            BotCommand("ref",    "🎁 Реферальная ссылка"),
+        ]
+        for rid in [OWNER_ID, MANAGER_USER_ID]:
+            if rid:
+                try:
+                    await app.bot.set_my_commands(
+                        admin_cmds, scope=BotCommandScopeChat(chat_id=rid))
+                except Exception as e:
+                    logger.error(f"set admin commands {rid}: {e}")
+        logger.info("📱 Командное меню установлено")
+    except Exception as e:
+        logger.error(f"set_my_commands: {e}")
+
     # Планируем ежедневный автобэкап (если JobQueue доступна).
     # JobQueue требует установки extras: pip install "python-telegram-bot[job-queue]".
     # Если недоступна — не критично, есть ручная команда /backup.
@@ -2491,6 +3212,13 @@ def main():
     app.add_handler(CommandHandler("chats",   cmd_chats))
     app.add_handler(CommandHandler("backup",  cmd_backup))
     app.add_handler(CommandHandler("ref",     cmd_ref))
+    app.add_handler(CommandHandler("deals",   cmd_deals))
+    app.add_handler(CommandHandler("deal",    cmd_deal))
+    app.add_handler(CommandHandler("client",  cmd_client))
+    app.add_handler(CommandHandler("funnel",  cmd_funnel))
+    # быстрые ссылки вида /deal_D_0042 из списка /deals
+    app.add_handler(MessageHandler(
+        filters.Regex(r'^/deal_D_\d{4}'), cmd_deal))
     app.add_handler(CallbackQueryHandler(button_cb))
     app.add_handler(MessageHandler(
         filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO,
