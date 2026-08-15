@@ -3203,7 +3203,7 @@ def main():
     threading.Thread(target=health_server, daemon=True).start()
     print("--- health thread OK ---", flush=True)
 
-    print(f"--- token: {BOT_TOKEN[:10]}... ---", flush=True)
+    print(f"--- token: {'OK' if BOT_TOKEN else 'MISSING'} ---", flush=True)
 
     try:
         app = Application.builder().token(BOT_TOKEN).post_init(on_start).build()
