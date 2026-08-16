@@ -1565,12 +1565,87 @@ def _html_to_vk(text):
     text = re.sub(r'</?[a-zA-Z][^>]*>', '', text)
     return text.strip()
 
-async def post_to_vk(caption):
+async def _vk_upload_photos(bot, file_ids, max_photos=6):
     """
-    Публикует пост в VK-сообщество через API wall.post.
+    Загружает фото в VK для последующего прикрепления к посту.
+    Полный flow VK API:
+      1. photos.getWallUploadServer → получаем upload_url
+      2. скачиваем фото из Telegram по file_id
+      3. POST multipart на upload_url → server/photo/hash
+      4. photos.saveWallPhoto → owner_id/id фото
+    Возвращает список attachment-строк вида "photo{owner}_{id}".
+    Ошибки не роняют публикацию — вернём то, что успели загрузить.
+    """
+    import urllib.request, urllib.parse
+    attachments = []
+    loop = asyncio.get_event_loop()
+
+    def _get_upload_server():
+        p = urllib.parse.urlencode({
+            'group_id': VK_GROUP_ID, 'access_token': VK_TOKEN, 'v': '5.199'})
+        with urllib.request.urlopen(
+                f'https://api.vk.com/method/photos.getWallUploadServer?{p}',
+                timeout=15) as r:
+            return json.loads(r.read().decode())
+
+    def _upload(upload_url, img_bytes):
+        # multipart/form-data с одним файлом photo
+        boundary = '----ProAutoVKBoundary'
+        body = b''
+        body += f'--{boundary}\r\n'.encode()
+        body += b'Content-Disposition: form-data; name="photo"; filename="photo.jpg"\r\n'
+        body += b'Content-Type: image/jpeg\r\n\r\n'
+        body += img_bytes + b'\r\n'
+        body += f'--{boundary}--\r\n'.encode()
+        req = urllib.request.Request(upload_url, data=body)
+        req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+
+    def _save(server, photo, vk_hash):
+        p = urllib.parse.urlencode({
+            'group_id': VK_GROUP_ID, 'server': server, 'photo': photo,
+            'hash': vk_hash, 'access_token': VK_TOKEN, 'v': '5.199'})
+        with urllib.request.urlopen(
+                f'https://api.vk.com/method/photos.saveWallPhoto?{p}',
+                timeout=15) as r:
+            return json.loads(r.read().decode())
+
+    try:
+        srv = await loop.run_in_executor(None, _get_upload_server)
+        if 'response' not in srv:
+            logger.error(f"VK getWallUploadServer: {srv}")
+            return []
+        upload_url = srv['response']['upload_url']
+
+        for fid in file_ids[:max_photos]:
+            try:
+                # 1. скачиваем фото из Telegram
+                tg_file = await bot.get_file(fid)
+                img_bytes = await tg_file.download_as_bytearray()
+                img_bytes = bytes(img_bytes)
+                # 2. заливаем на сервер VK
+                up = await loop.run_in_executor(None, _upload, upload_url, img_bytes)
+                if not up.get('photo') or up.get('photo') == '[]':
+                    continue
+                # 3. сохраняем
+                saved = await loop.run_in_executor(
+                    None, _save, up['server'], up['photo'], up['hash'])
+                if 'response' in saved and saved['response']:
+                    ph = saved['response'][0]
+                    attachments.append(f"photo{ph['owner_id']}_{ph['id']}")
+            except Exception as e:
+                logger.error(f"VK upload one photo: {e}")
+                continue
+    except Exception as e:
+        logger.error(f"_vk_upload_photos: {e}")
+    return attachments
+
+async def post_to_vk(caption, bot=None, file_ids=None):
+    """
+    Публикует пост в VK-сообщество через wall.post.
+    Если переданы bot и file_ids — сначала загружает фото и прикрепляет их.
     Работает только если заданы VK_TOKEN и VK_GROUP_ID.
-    Фото пока не прикрепляем (это отдельный многошаговый flow VK API);
-    постим текст со ссылкой на Telegram-канал — как второй канал охвата.
     Возвращает True при успехе.
     """
     if not VK_TOKEN or not VK_GROUP_ID:
@@ -1578,6 +1653,12 @@ async def post_to_vk(caption):
     try:
         import urllib.request, urllib.parse
         vk_text = _html_to_vk(caption)
+
+        # Загружаем фото, если есть что и переданы данные
+        attachments = []
+        if bot and file_ids:
+            attachments = await _vk_upload_photos(bot, file_ids)
+
         params = {
             'owner_id': f'-{VK_GROUP_ID}',   # минус = сообщество
             'from_group': 1,
@@ -1585,16 +1666,20 @@ async def post_to_vk(caption):
             'access_token': VK_TOKEN,
             'v': '5.199',
         }
+        if attachments:
+            params['attachments'] = ','.join(attachments)
+
         data = urllib.parse.urlencode(params).encode('utf-8')
         req = urllib.request.Request('https://api.vk.com/method/wall.post', data=data)
         loop = asyncio.get_event_loop()
         def _do():
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 return resp.read().decode('utf-8')
         raw = await loop.run_in_executor(None, _do)
         res = json.loads(raw)
         if 'response' in res:
-            logger.info(f"🟦 Опубликовано в VK: post {res['response'].get('post_id')}")
+            logger.info(f"🟦 VK: post {res['response'].get('post_id')} "
+                        f"({len(attachments)} фото)")
             return True
         logger.error(f"VK ошибка: {res}")
         return False
@@ -1673,10 +1758,11 @@ async def publish(update, context, info):
                  original_caption=text,
                  telegram_link=pl)
         logger.info(f"✅ {pid}")
-        # Мультиканал: дублируем в VK (если настроен). Не блокирует и
+        # Мультиканал: дублируем в VK с фото (если настроен). Не блокирует и
         # не роняет основную публикацию при сбое VK.
         try:
-            await post_to_vk(new)
+            _vk_photos = [msg.photo[-1].file_id] if hp else []
+            await post_to_vk(new, bot=context.bot, file_ids=_vk_photos)
         except Exception as e:
             logger.error(f"VK repost: {e}")
     except Exception as e:
@@ -1723,6 +1809,12 @@ async def _album(mgid, context):
                      published_message_id=pmid,
                      original_caption=caption,
                      telegram_link=pl)
+            # Мультиканал: VK со всеми фото альбома (video пропускаем)
+            try:
+                _vk_photos = [fid for k, fid in photos if k == 'photo']
+                await post_to_vk(new, bot=context.bot, file_ids=_vk_photos)
+            except Exception as e:
+                logger.error(f"VK repost album: {e}")
         logger.info(f"✅ Альбом {pid}")
     except Exception as e:
         logger.error(f"❌ _album: {e}")
@@ -1913,10 +2005,17 @@ async def finalize(update, context, uid):
                f"Благодарим за доверие к ProAuto ✅\n\n"
                f'<a href="https://t.me/{TARGET_CHANNEL.replace("@","")}">{TARGET_CHANNEL}</a>')
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=msg, parse_mode='HTML',
-        disable_web_page_preview=True)
+    # Подтверждение клиенту — в try/except: если Telegram на секунду
+    # не ответит (TimedOut и т.п.), уведомление менеджеру ВСЁ РАВНО
+    # должно дойти — заявка и сделка уже сохранены в базе, менеджер
+    # не должен терять её из вида из-за случайного сетевого сбоя.
+    try:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=msg, parse_mode='HTML',
+            disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"finalize: не удалось отправить подтверждение клиенту {uid}: {e}")
     await notify_manager(context, lid, ld, deal_id=deal_id)
     clear_state(uid)
 
@@ -3203,7 +3302,7 @@ def main():
     threading.Thread(target=health_server, daemon=True).start()
     print("--- health thread OK ---", flush=True)
 
-    print(f"--- token: {'OK' if BOT_TOKEN else 'MISSING'} ---", flush=True)
+    print(f"--- token: {BOT_TOKEN[:10]}... ---", flush=True)
 
     try:
         app = Application.builder().token(BOT_TOKEN).post_init(on_start).build()
